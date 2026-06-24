@@ -95,6 +95,7 @@ function normalizeGamesFromPipeline(payload, teamsById) {
     return {
       gamePk: g.gamePk,
       timeLabel: time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+      dateStr: g.gameDateStr ?? g.gameDate?.slice(0, 10),
       home, away,
     };
   }).filter(Boolean);
@@ -187,14 +188,18 @@ function buildModel(matchup) {
   const expectedMargin = (diff / 400) * 1.4;
 
   const homeIsFavorite = homeWinProb >= 0.5;
-  const favMinus1_5 = 1 / (1 + Math.exp(-(Math.abs(expectedMargin) - 1.5) * 1.15));
+  // Probabilidad de que el FAVORITO cubra -1.5. Pendiente calibrada contra
+  // referencias reales de mercado: favoritos moderados (55-65% ML) suelen
+  // cotizar el RL -1.5 con momio positivo (cobertura ~35-40%), no 15-20%
+  // como daba la pendiente anterior, demasiado agresiva.
+  const favMinus1_5 = 1 / (1 + Math.exp(-(Math.abs(expectedMargin) - 1.5) / 2.5));
   const dogPlus1_5 = 1 - favMinus1_5;
 
   const f5Diff = diff * 0.62;
   const f5HomeWinProb = eloWinProb(f5Diff);
   const f5ExpectedMargin = (f5Diff / 400) * 1.4;
   const f5HomeIsFavorite = f5HomeWinProb >= 0.5;
-  const f5FavMinus0_5 = 1 / (1 + Math.exp(-(Math.abs(f5ExpectedMargin) - 0.5) * 1.3));
+  const f5FavMinus0_5 = 1 / (1 + Math.exp(-(Math.abs(f5ExpectedMargin) - 0.5) / 1.4));
   const f5DogPlus0_5 = 1 - f5FavMinus0_5;
   const f5ProjectedTotal = projectedTotal * 0.56;
 
@@ -888,6 +893,8 @@ export default function MLBEdge() {
   const [pipelineMeta, setPipelineMeta] = useState(null);
   const [teams, setTeams] = useState(TEAMS_FALLBACK);
   const [autoGames, setAutoGames] = useState([]);
+  const [availableDates, setAvailableDates] = useState([]);
+  const [selectedDate, setSelectedDate] = useState(null);
   const [calendarLoadedId, setCalendarLoadedId] = useState(null);
 
   const loadPipeline = useCallback(async () => {
@@ -899,8 +906,11 @@ export default function MLBEdge() {
       if (!normTeams.length) throw new Error("El JSON no trae equipos.");
       const teamsById = Object.fromEntries(payload.teams.map(t => [t.id, normTeams.find(nt => nt.id === t.id)]));
       const normGames = normalizeGamesFromPipeline(payload, teamsById);
+      const dates = payload.availableDates ?? [payload.date];
       setTeams(normTeams);
       setAutoGames(normGames);
+      setAvailableDates(dates);
+      setSelectedDate((prev) => prev && dates.includes(prev) ? prev : dates[0]);
       setPipelineMeta({ generatedAt: payload.generatedAt, date: payload.date });
       setPipelineStatus("ok");
     } catch (e) {
@@ -913,10 +923,16 @@ export default function MLBEdge() {
 
   useEffect(() => { loadPipeline(); }, [loadPipeline]);
 
-  const loadTodaysCalendar = () => {
-    if (!autoGames.length) return;
-    setMatchups(autoGames.map(g => ({ ...emptyMatchup(), home: g.home, away: g.away, timeLabel: g.timeLabel })));
-    setCalendarLoadedId(pipelineMeta?.date ?? "loaded");
+  const gamesForSelectedDate = useMemo(
+    () => autoGames.filter(g => g.dateStr === selectedDate),
+    [autoGames, selectedDate]
+  );
+
+  const loadCalendarForDate = (dateStr) => {
+    const games = autoGames.filter(g => g.dateStr === dateStr);
+    if (!games.length) return;
+    setMatchups(games.map(g => ({ ...emptyMatchup(), home: g.home, away: g.away, timeLabel: g.timeLabel })));
+    setCalendarLoadedId(dateStr);
   };
 
   const updateMatchup = (id, patch) => setMatchups((prev) => prev.map(m => m.id === id ? { ...m, ...patch } : m));
@@ -965,7 +981,7 @@ export default function MLBEdge() {
         <div className="px-6 py-4 flex items-center justify-between">
           <div>
             <h1 className="font-display text-3xl font-bold tracking-wide leading-none">MLB <span className="text-green">EDGE</span></h1>
-            <p className="fs-10 text-white/35 mt-1 tracking-wide">TEMPORADA 2026 · PIPELINE AUTÓNOMO{autoGames.length > 0 ? ` · ${autoGames.length} JUEGOS HOY` : ""}</p>
+            <p className="fs-10 text-white/35 mt-1 tracking-wide">TEMPORADA 2026 · PIPELINE AUTÓNOMO{autoGames.length > 0 ? ` · ${autoGames.length} JUEGOS CARGADOS` : ""}</p>
           </div>
           <div className="flex items-center gap-2.5">
             {pipelineStatus === "ok" && (
@@ -994,11 +1010,30 @@ export default function MLBEdge() {
           </div>
         </div>
       )}
-      {pipelineStatus === "ok" && autoGames.length > 0 && calendarLoadedId !== (pipelineMeta?.date ?? "loaded") && (
-        <div className="px-6 pt-4">
-          <button onClick={loadTodaysCalendar} className="font-display fs-10 font-bold text-green bg-green-chip-10 ring-1 ring-green-30 px-4 py-2 rounded-full">
-            Cargar calendario de hoy ({autoGames.length} juegos)
-          </button>
+      {pipelineStatus === "ok" && availableDates.length > 0 && (
+        <div className="px-6 pt-4 flex items-center gap-3 flex-wrap">
+          <div className="flex gap-2">
+            {availableDates.map((d, i) => {
+              const dt = new Date(d + "T12:00:00");
+              const label = i === 0 ? "Hoy" : i === 1 ? "Mañana" : dt.toLocaleDateString([], { weekday: "short", day: "numeric" });
+              const count = autoGames.filter(g => g.dateStr === d).length;
+              const active = selectedDate === d;
+              return (
+                <button
+                  key={d}
+                  onClick={() => setSelectedDate(d)}
+                  className={`font-display fs-10 font-bold px-3.5 py-2 rounded-full transition-all ${active ? "text-green bg-green-chip-10 ring-1 ring-green-30" : "text-white/40 bg-white-02 ring-1 ring-white/10"}`}
+                >
+                  {label} · {count}
+                </button>
+              );
+            })}
+          </div>
+          {gamesForSelectedDate.length > 0 && calendarLoadedId !== selectedDate && (
+            <button onClick={() => loadCalendarForDate(selectedDate)} className="font-display fs-10 font-bold text-amber-300 bg-amber-400/10 ring-1 ring-amber-400/30 px-4 py-2 rounded-full">
+              Cargar estos {gamesForSelectedDate.length} juegos
+            </button>
+          )}
         </div>
       )}
 

@@ -332,6 +332,8 @@ function getPropsForMatchup(matchup) {
       player: p.player,
       decimalOdds: p.decimalOdds,
       line: p.line,
+      modelProb: p.modelProb ?? null,
+      edge: p.edge ?? null,
       isReal: true,
     }));
   }
@@ -748,16 +750,29 @@ function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll })
       </div>
       {hasAuto && isReal ? (
         <div className="space-y-2">
-          {autoProps.map((p, i) => (
-            <div key={i} className="grid items-center gap-2" style={{ gridTemplateColumns: "1fr 64px 28px" }}>
-              <span className="text-sm font-bold text-brand truncate">{p.player} <span className="text-white/40 font-normal">· {p.type}{p.line ? ` ${p.line}+` : ""}</span></span>
-              <span className="font-mono text-sm font-bold text-brand text-right">{Number(p.decimalOdds).toFixed(2)}</span>
-              {onLog ? (
-                <button onClick={() => onLog({ ...logContext, market: "Prop", label: `${p.player} · ${p.type}`, prob: null, odds: p.decimalOdds, edge: null, stake: 0 })} className="w-6 h-6 rounded-full bg-accent-chip ring-1 ring-accent-30 text-accent text-sm font-bold flex items-center justify-center justify-self-end">+</button>
-              ) : <span />}
-            </div>
-          ))}
-          <p className="fs-9 text-white/25 leading-relaxed">Momio real del mercado (The Odds API). Sin probabilidad de modelo propia para esta prop — decide tú el tamaño de la apuesta al registrarla.</p>
+          {autoProps.map((p, i) => {
+            const hasModel = p.modelProb !== null && p.modelProb !== undefined;
+            const stake = hasModel && bankroll ? (kellyFraction(p.modelProb, p.decimalOdds) ?? 0) * Number(bankroll) : null;
+            return (
+              <div key={i} className="grid items-center gap-2" style={{ gridTemplateColumns: hasModel ? "1fr 56px 60px 40px 28px" : "1fr 64px 28px" }}>
+                <span className="text-sm font-bold text-brand truncate">{p.player} <span className="text-white/40 font-normal">· {p.type}{p.line ? ` ${p.line}+` : ""}</span></span>
+                <span className="font-mono text-sm font-bold text-brand text-right">{Number(p.decimalOdds).toFixed(2)}</span>
+                {hasModel ? (
+                  <>
+                    <div className="flex flex-col items-end leading-tight">
+                      <span className="font-mono text-sm font-bold" style={{ color: p.edge >= 0 ? "#00FFB2" : "#FF3D71" }}>{p.edge > 0 ? "+" : ""}{p.edge.toFixed(1)}%</span>
+                      <TierChip edge={p.edge} />
+                    </div>
+                    <span className="fs-9 font-mono text-amber-300/80 text-right">{stake && stake > 0 ? `$${stake.toFixed(0)}` : ""}</span>
+                  </>
+                ) : null}
+                {onLog ? (
+                  <button onClick={() => onLog({ ...logContext, market: "Prop", label: `${p.player} · ${p.type}`, prob: p.modelProb ?? null, odds: p.decimalOdds, edge: p.edge ?? null, stake: stake ?? 0 })} className="w-6 h-6 rounded-full bg-accent-chip ring-1 ring-accent-30 text-accent text-sm font-bold flex items-center justify-center justify-self-end">+</button>
+                ) : <span />}
+              </div>
+            );
+          })}
+          <p className="fs-9 text-white/25 leading-relaxed">Momio real del mercado (The Odds API). Edge calculado cuando hay suficiente dato de temporada del jugador (mín. 60 turnos) — sin ese mínimo, solo se muestra el momio para que decidas tú.</p>
         </div>
       ) : hasAuto ? (
         <div className="space-y-2">

@@ -365,6 +365,17 @@ function profitForEntry(entry) {
   if (!d) return 0;
   return Number(entry.stake || 0) * (d - 1);
 }
+// Clave única para identificar una fila de momio específica dentro de un
+// juego: gamePk + mercado + etiqueta exacta. Se usa para saber si esa fila
+// ya tiene una apuesta registrada en la bitácora, sin importar su resultado.
+function betRowKey(gamePk, market, label) {
+  return `${gamePk ?? "?"}::${market ?? "?"}::${label ?? "?"}`;
+}
+
+function buildLoggedKeysSet(entries) {
+  return new Set(entries.map(e => betRowKey(e.gamePk, e.market, e.label)));
+}
+
 function summarizeLog(entries) {
   const settled = entries.filter(e => e.result === "won" || e.result === "lost" || e.result === "push");
   const totalStaked = settled.reduce((s, e) => s + Number(e.stake || 0), 0);
@@ -624,14 +635,15 @@ function TeamSelect({ value, onChange, exclude, label, teams }) {
 
 // Fila de momio: columnas con ancho fijo y espacio real entre ellas, para que
 // el número del momio y el edge no compitan visualmente con la barra.
-function BetRow({ label, prob, oddsValue, edge, onOddsChange, bankroll, onLog, logContext, bothSidesFilled = true }) {
+function BetRow({ label, prob, oddsValue, edge, onOddsChange, bankroll, onLog, logContext, bothSidesFilled = true, loggedKeys }) {
   const kelly = oddsValue ? kellyFraction(prob, oddsValue) : null;
   const stake = kelly && kelly > 0 && bankroll ? kelly * Number(bankroll) : null;
-  const canLog = onLog && oddsValue;
+  const isLogged = loggedKeys?.has(betRowKey(logContext?.gamePk, logContext?.market, label));
+  const canLog = onLog && oddsValue && !isLogged;
   const showTier = oddsValue && bothSidesFilled;
   const positive = (edge ?? 0) >= 0;
   return (
-    <div className="grid items-center gap-3 py-2.5 border-b border-white/[0.04] last:border-b-0" style={{ gridTemplateColumns: "56px 1fr 84px 80px 40px" }}>
+    <div className={`grid items-center gap-3 py-2.5 border-b border-white/[0.04] last:border-b-0 ${isLogged ? "opacity-60" : ""}`} style={{ gridTemplateColumns: "56px 1fr 84px 80px 40px" }}>
       <span className="text-sm font-bold text-brand">{label}</span>
       <div>
         <div className="fs-9 text-white/35 mb-1">modelo {(prob * 100).toFixed(0)}%</div>
@@ -653,7 +665,11 @@ function BetRow({ label, prob, oddsValue, edge, onOddsChange, bankroll, onLog, l
         )}
         {stake && stake > 0 && showTier && <span className="fs-9 font-mono text-amber-300/80">${stake.toFixed(0)}</span>}
       </div>
-      {canLog ? (
+      {isLogged ? (
+        <span title="Ya registrada en la bitácora" className="w-7 h-7 rounded-full bg-white/5 ring-1 ring-white/15 text-white/50 flex items-center justify-center justify-self-end">
+          <CheckCircle2 size={15} />
+        </span>
+      ) : canLog ? (
         <button
           onClick={() => onLog({ ...logContext, label, prob, odds: oddsValue, edge, stake: stake ?? 0 })}
           title="Agregar a la bitácora"
@@ -666,7 +682,7 @@ function BetRow({ label, prob, oddsValue, edge, onOddsChange, bankroll, onLog, l
   );
 }
 
-function RunLineSection({ model, oddsKeyFav, oddsKeyDog, invertedKey = "rlInverted", odds, setOdds, homeAbbr, awayAbbr, bankroll, onLog, logContext, line = 1.5 }) {
+function RunLineSection({ model, oddsKeyFav, oddsKeyDog, invertedKey = "rlInverted", odds, setOdds, homeAbbr, awayAbbr, bankroll, onLog, logContext, line = 1.5, loggedKeys }) {
   const modelFavIsHome = model.homeIsFavorite;
   const inverted = !!odds[invertedKey];
   const favIsHome = inverted ? !modelFavIsHome : modelFavIsHome;
@@ -693,8 +709,8 @@ function RunLineSection({ model, oddsKeyFav, oddsKeyDog, invertedKey = "rlInvert
         </button>
       </div>
       <div>
-        <BetRow label={`${favAbbr} -${line}`} prob={favProb} oddsValue={odds[oddsKeyFav]} edge={favEdge} onOddsChange={(v) => setOdds({ ...odds, [oddsKeyFav]: v })} bankroll={bankroll} onLog={onLog} logContext={{ ...logContext, market: `Run Line -${line}` }} bothSidesFilled={bothFilled} />
-        <BetRow label={`${dogAbbr} +${line}`} prob={dogProb} oddsValue={odds[oddsKeyDog]} edge={dogEdge} onOddsChange={(v) => setOdds({ ...odds, [oddsKeyDog]: v })} bankroll={bankroll} onLog={onLog} logContext={{ ...logContext, market: `Run Line +${line}` }} bothSidesFilled={bothFilled} />
+        <BetRow label={`${favAbbr} -${line}`} prob={favProb} oddsValue={odds[oddsKeyFav]} edge={favEdge} onOddsChange={(v) => setOdds({ ...odds, [oddsKeyFav]: v })} bankroll={bankroll} onLog={onLog} logContext={{ ...logContext, market: `Run Line -${line}` }} bothSidesFilled={bothFilled} loggedKeys={loggedKeys} />
+        <BetRow label={`${dogAbbr} +${line}`} prob={dogProb} oddsValue={odds[oddsKeyDog]} edge={dogEdge} onOddsChange={(v) => setOdds({ ...odds, [oddsKeyDog]: v })} bankroll={bankroll} onLog={onLog} logContext={{ ...logContext, market: `Run Line +${line}` }} bothSidesFilled={bothFilled} loggedKeys={loggedKeys} />
       </div>
     </div>
   );
@@ -731,7 +747,7 @@ function MarketCompare({ oddsA, oddsB, onChangeA, onChangeB, labelA, labelB }) {
   );
 }
 
-function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll }) {
+function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll, loggedKeys }) {
   const [editing, setEditing] = useState(false);
   const [propOdds, setPropOdds] = useState({});
   const parsedManual = useMemo(() => parsePropsText(value), [value]);
@@ -755,8 +771,10 @@ function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll })
           {autoProps.map((p, i) => {
             const hasModel = p.modelProb !== null && p.modelProb !== undefined;
             const stake = hasModel && bankroll ? (kellyFraction(p.modelProb, p.decimalOdds) ?? 0) * Number(bankroll) : null;
+            const propLabel = `${p.player} · ${p.type}`;
+            const isLogged = loggedKeys?.has(betRowKey(logContext?.gamePk, "Prop", propLabel));
             return (
-              <div key={i} className="grid items-center gap-2" style={{ gridTemplateColumns: hasModel ? "1fr 56px 60px 40px 28px" : "1fr 64px 28px" }}>
+              <div key={i} className={`grid items-center gap-2 ${isLogged ? "opacity-60" : ""}`} style={{ gridTemplateColumns: hasModel ? "1fr 56px 60px 40px 28px" : "1fr 64px 28px" }}>
                 <span className="text-sm font-bold text-brand truncate">{p.player} <span className="text-white/40 font-normal">· {p.type}{p.line ? ` ${p.line}+` : ""}</span></span>
                 <span className="font-mono text-sm font-bold text-brand text-right">{Number(p.decimalOdds).toFixed(2)}</span>
                 {hasModel ? (
@@ -768,8 +786,10 @@ function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll })
                     <span className="fs-9 font-mono text-amber-300/80 text-right">{stake && stake > 0 ? `$${stake.toFixed(0)}` : ""}</span>
                   </>
                 ) : null}
-                {onLog ? (
-                  <button onClick={() => onLog({ ...logContext, market: "Prop", label: `${p.player} · ${p.type}`, prob: p.modelProb ?? null, odds: p.decimalOdds, edge: p.edge ?? null, stake: stake ?? 0 })} className="w-6 h-6 rounded-full bg-accent-chip ring-1 ring-accent-30 text-accent text-sm font-bold flex items-center justify-center justify-self-end">+</button>
+                {isLogged ? (
+                  <span title="Ya registrada en la bitácora" className="w-6 h-6 rounded-full bg-white/5 ring-1 ring-white/15 text-white/50 flex items-center justify-center justify-self-end"><CheckCircle2 size={13} /></span>
+                ) : onLog ? (
+                  <button onClick={() => onLog({ ...logContext, market: "Prop", label: propLabel, prob: p.modelProb ?? null, odds: p.decimalOdds, edge: p.edge ?? null, stake: stake ?? 0 })} className="w-6 h-6 rounded-full bg-accent-chip ring-1 ring-accent-30 text-accent text-sm font-bold flex items-center justify-center justify-self-end">+</button>
                 ) : <span />}
               </div>
             );
@@ -781,14 +801,18 @@ function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll })
           {autoProps.map((p, i) => {
             const oddsVal = propOdds[i] ?? "";
             const stake = oddsVal && bankroll ? (kellyFraction(p.confidence / 100, oddsVal) ?? 0) * Number(bankroll) : null;
+            const propLabel = `${p.player} · ${p.type}`;
+            const isLogged = loggedKeys?.has(betRowKey(logContext?.gamePk, "Prop", propLabel));
             return (
-              <div key={i} className="grid items-center gap-2" style={{ gridTemplateColumns: "1fr 40px 64px 40px 28px" }}>
+              <div key={i} className={`grid items-center gap-2 ${isLogged ? "opacity-60" : ""}`} style={{ gridTemplateColumns: "1fr 40px 64px 40px 28px" }}>
                 <span className="text-sm font-bold text-brand truncate">{p.player} <span className="text-white/40 font-normal">· {p.type}</span></span>
                 <span className="fs-10 font-mono text-amber-300 text-right">{p.confidence.toFixed(0)}%</span>
                 <OddsInput value={oddsVal} onChange={(v) => setPropOdds({ ...propOdds, [i]: v })} />
                 <span className="fs-9 font-mono text-amber-300/80 text-right">{stake && stake > 0 ? `$${stake.toFixed(0)}` : ""}</span>
-                {onLog && oddsVal ? (
-                  <button onClick={() => onLog({ ...logContext, market: "Prop", label: `${p.player} · ${p.type}`, prob: p.confidence / 100, odds: oddsVal, edge: null, stake: stake ?? 0 })} className="w-6 h-6 rounded-full bg-accent-chip ring-1 ring-accent-30 text-accent text-sm font-bold flex items-center justify-center justify-self-end">+</button>
+                {isLogged ? (
+                  <span title="Ya registrada en la bitácora" className="w-6 h-6 rounded-full bg-white/5 ring-1 ring-white/15 text-white/50 flex items-center justify-center justify-self-end"><CheckCircle2 size={13} /></span>
+                ) : onLog && oddsVal ? (
+                  <button onClick={() => onLog({ ...logContext, market: "Prop", label: propLabel, prob: p.confidence / 100, odds: oddsVal, edge: null, stake: stake ?? 0 })} className="w-6 h-6 rounded-full bg-accent-chip ring-1 ring-accent-30 text-accent text-sm font-bold flex items-center justify-center justify-self-end">+</button>
                 ) : <span />}
               </div>
             );
@@ -887,7 +911,7 @@ function MatchupCardCompact({ matchup, odds, onOpen, onRemove, teams, setMatchup
 // ---------------------------------------------------------------------------
 // MATCHUP DETAIL PANEL
 // ---------------------------------------------------------------------------
-function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankroll, onAddToLog }) {
+function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankroll, onAddToLog, loggedKeys }) {
   const [f5Open, setF5Open] = useState(false);
   const model = buildModel(matchup);
   const autoProps = getPropsForMatchup(matchup);
@@ -1004,8 +1028,8 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
               </button>
             </div>
             <div>
-              <BetRow label={matchup.away.abbr} prob={model.awayWinProb} oddsValue={odds.mlAway} edge={mlAwayEdge} onOddsChange={(v) => setOdds({ ...odds, mlAway: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "Moneyline", betType: "ML", side: "away" }} bothSidesFilled={!!(odds.mlAway && odds.mlHome)} />
-              <BetRow label={matchup.home.abbr} prob={model.homeWinProb} oddsValue={odds.mlHome} edge={mlHomeEdge} onOddsChange={(v) => setOdds({ ...odds, mlHome: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "Moneyline", betType: "ML", side: "home" }} bothSidesFilled={!!(odds.mlAway && odds.mlHome)} />
+              <BetRow label={matchup.away.abbr} prob={model.awayWinProb} oddsValue={odds.mlAway} edge={mlAwayEdge} onOddsChange={(v) => setOdds({ ...odds, mlAway: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "Moneyline", betType: "ML", side: "away" }} bothSidesFilled={!!(odds.mlAway && odds.mlHome)} loggedKeys={loggedKeys} />
+              <BetRow label={matchup.home.abbr} prob={model.homeWinProb} oddsValue={odds.mlHome} edge={mlHomeEdge} onOddsChange={(v) => setOdds({ ...odds, mlHome: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "Moneyline", betType: "ML", side: "home" }} bothSidesFilled={!!(odds.mlAway && odds.mlHome)} loggedKeys={loggedKeys} />
             </div>
             {matchup.mlCompareOpen && (
               <div className="mt-2">
@@ -1021,7 +1045,7 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
             )}
           </div>
 
-          <RunLineSection model={model} oddsKeyFav="rlFav" oddsKeyDog="rlDog" odds={odds} setOdds={setOdds} homeAbbr={matchup.home.abbr} awayAbbr={matchup.away.abbr} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, betType: "RL" }} line={1.5} />
+          <RunLineSection model={model} oddsKeyFav="rlFav" oddsKeyDog="rlDog" odds={odds} setOdds={setOdds} homeAbbr={matchup.home.abbr} awayAbbr={matchup.away.abbr} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, betType: "RL" }} line={1.5} loggedKeys={loggedKeys} />
 
           <div>
             <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold mb-1">Total — modelo {model.projectedTotal.toFixed(1)}</p>
@@ -1030,8 +1054,8 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
               <input type="text" inputMode="decimal" value={odds.totalLine ?? ""} onChange={(e) => setOdds({ ...odds, totalLine: e.target.value })} placeholder="8.5" className="w-16 bg-input ring-1 ring-white/10 focus-ring-accent rounded-lg px-2 py-1 text-center font-mono text-sm text-brand placeholder:text-white/20" />
             </div>
             <div>
-              <BetRow label="Over" prob={overProb ?? 0.5} oddsValue={odds.over} edge={overEdge} onOddsChange={(v) => setOdds({ ...odds, over: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total ${odds.totalLine || ""}`, betType: "Total", side: "over", line: odds.totalLine ? Number(odds.totalLine) : null }} bothSidesFilled={!!(odds.over && odds.under)} />
-              <BetRow label="Under" prob={underProb ?? 0.5} oddsValue={odds.under} edge={underEdge} onOddsChange={(v) => setOdds({ ...odds, under: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total ${odds.totalLine || ""}`, betType: "Total", side: "under", line: odds.totalLine ? Number(odds.totalLine) : null }} bothSidesFilled={!!(odds.over && odds.under)} />
+              <BetRow label="Over" prob={overProb ?? 0.5} oddsValue={odds.over} edge={overEdge} onOddsChange={(v) => setOdds({ ...odds, over: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total ${odds.totalLine || ""}`, betType: "Total", side: "over", line: odds.totalLine ? Number(odds.totalLine) : null }} bothSidesFilled={!!(odds.over && odds.under)} loggedKeys={loggedKeys} />
+              <BetRow label="Under" prob={underProb ?? 0.5} oddsValue={odds.under} edge={underEdge} onOddsChange={(v) => setOdds({ ...odds, under: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total ${odds.totalLine || ""}`, betType: "Total", side: "under", line: odds.totalLine ? Number(odds.totalLine) : null }} bothSidesFilled={!!(odds.over && odds.under)} loggedKeys={loggedKeys} />
             </div>
           </div>
 
@@ -1045,11 +1069,11 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
                 <div>
                   <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold mb-1">Moneyline F5</p>
                   <div>
-                    <BetRow label={matchup.away.abbr} prob={model.f5.awayWinProb} oddsValue={odds.f5MlAway} edge={f5MlAwayEdge} onOddsChange={(v) => setOdds({ ...odds, f5MlAway: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "ML F5", betType: "ML", side: "away", isF5: true }} bothSidesFilled={!!(odds.f5MlAway && odds.f5MlHome)} />
-                    <BetRow label={matchup.home.abbr} prob={model.f5.homeWinProb} oddsValue={odds.f5MlHome} edge={f5MlHomeEdge} onOddsChange={(v) => setOdds({ ...odds, f5MlHome: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "ML F5", betType: "ML", side: "home", isF5: true }} bothSidesFilled={!!(odds.f5MlAway && odds.f5MlHome)} />
+                    <BetRow label={matchup.away.abbr} prob={model.f5.awayWinProb} oddsValue={odds.f5MlAway} edge={f5MlAwayEdge} onOddsChange={(v) => setOdds({ ...odds, f5MlAway: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "ML F5", betType: "ML", side: "away", isF5: true }} bothSidesFilled={!!(odds.f5MlAway && odds.f5MlHome)} loggedKeys={loggedKeys} />
+                    <BetRow label={matchup.home.abbr} prob={model.f5.homeWinProb} oddsValue={odds.f5MlHome} edge={f5MlHomeEdge} onOddsChange={(v) => setOdds({ ...odds, f5MlHome: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "ML F5", betType: "ML", side: "home", isF5: true }} bothSidesFilled={!!(odds.f5MlAway && odds.f5MlHome)} loggedKeys={loggedKeys} />
                   </div>
                 </div>
-                <RunLineSection model={model.f5} oddsKeyFav="f5RlFav" oddsKeyDog="f5RlDog" invertedKey="f5RlInverted" odds={odds} setOdds={setOdds} homeAbbr={matchup.home.abbr} awayAbbr={matchup.away.abbr} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "RL F5", betType: "RL", isF5: true }} line={0.5} />
+                <RunLineSection model={model.f5} oddsKeyFav="f5RlFav" oddsKeyDog="f5RlDog" invertedKey="f5RlInverted" odds={odds} setOdds={setOdds} homeAbbr={matchup.home.abbr} awayAbbr={matchup.away.abbr} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "RL F5", betType: "RL", isF5: true }} line={0.5} loggedKeys={loggedKeys} />
                 <div>
                   <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold mb-1">Total F5 — modelo {model.f5.projectedTotal.toFixed(1)}</p>
                   <div className="flex items-center gap-2 mb-2">
@@ -1057,15 +1081,15 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
                     <input type="text" inputMode="decimal" value={odds.f5TotalLine ?? ""} onChange={(e) => setOdds({ ...odds, f5TotalLine: e.target.value })} placeholder="4.5" className="w-16 bg-input ring-1 ring-white/10 focus-ring-accent rounded-lg px-2 py-1 text-center font-mono text-sm text-brand placeholder:text-white/20" />
                   </div>
                   <div>
-                    <BetRow label="Over" prob={f5OverProb ?? 0.5} oddsValue={odds.f5Over} edge={f5OverEdge} onOddsChange={(v) => setOdds({ ...odds, f5Over: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total F5 ${odds.f5TotalLine || ""}`, betType: "Total", side: "over", line: odds.f5TotalLine ? Number(odds.f5TotalLine) : null, isF5: true }} bothSidesFilled={!!(odds.f5Over && odds.f5Under)} />
-                    <BetRow label="Under" prob={f5UnderProb ?? 0.5} oddsValue={odds.f5Under} edge={f5UnderEdge} onOddsChange={(v) => setOdds({ ...odds, f5Under: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total F5 ${odds.f5TotalLine || ""}`, betType: "Total", side: "under", line: odds.f5TotalLine ? Number(odds.f5TotalLine) : null, isF5: true }} bothSidesFilled={!!(odds.f5Over && odds.f5Under)} />
+                    <BetRow label="Over" prob={f5OverProb ?? 0.5} oddsValue={odds.f5Over} edge={f5OverEdge} onOddsChange={(v) => setOdds({ ...odds, f5Over: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total F5 ${odds.f5TotalLine || ""}`, betType: "Total", side: "over", line: odds.f5TotalLine ? Number(odds.f5TotalLine) : null, isF5: true }} bothSidesFilled={!!(odds.f5Over && odds.f5Under)} loggedKeys={loggedKeys} />
+                    <BetRow label="Under" prob={f5UnderProb ?? 0.5} oddsValue={odds.f5Under} edge={f5UnderEdge} onOddsChange={(v) => setOdds({ ...odds, f5Under: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total F5 ${odds.f5TotalLine || ""}`, betType: "Total", side: "under", line: odds.f5TotalLine ? Number(odds.f5TotalLine) : null, isF5: true }} bothSidesFilled={!!(odds.f5Over && odds.f5Under)} loggedKeys={loggedKeys} />
                   </div>
                 </div>
               </div>
             )}
           </div>
 
-          <PropsPanel value={matchup.propsText} onChange={(v) => setMatchup({ ...matchup, propsText: v })} autoProps={autoProps} onLog={onAddToLog} logContext={logContext} bankroll={bankroll} />
+          <PropsPanel value={matchup.propsText} onChange={(v) => setMatchup({ ...matchup, propsText: v })} autoProps={autoProps} onLog={onAddToLog} logContext={logContext} bankroll={bankroll} loggedKeys={loggedKeys} />
 
           <p className="fs-9 text-white/25 leading-relaxed pt-2 border-t border-white/[0.06]">
             Modelo: Elo + abridor + bullpen + splits + forma + clima. RL asigna -1.5/+1.5 según favorito del modelo — usa ⇄ si el mercado real difiere. BET ≥6%, LEAN ≥2.5%, FADE &lt;-2.5%. F5 se cotejan a mano.
@@ -1496,6 +1520,7 @@ export default function MLBEdge() {
   const [oddsMap, setOddsMap] = useState({});
   const [bankroll, setBankroll] = useState("1000");
   const [betLog, setBetLog] = useState(() => loadBetLog());
+  const loggedKeys = useMemo(() => buildLoggedKeysSet(betLog), [betLog]);
 
   useEffect(() => { saveBetLog(betLog); }, [betLog]);
 
@@ -1749,6 +1774,7 @@ export default function MLBEdge() {
           onClose={() => setOpenId(null)}
           bankroll={bankroll}
           onAddToLog={handleAddToLog}
+          loggedKeys={loggedKeys}
         />
       )}
     </div>

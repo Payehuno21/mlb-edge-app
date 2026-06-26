@@ -105,6 +105,7 @@ function normalizeTeamsFromPipeline(payload) {
     homeWinPct: t.homeWinPct, awayWinPct: t.awayWinPct, last10: t.last10,
     elo: t.elo, runsPerGame: t.runsPerGame, staffEra: t.staffEra,
     topPowerHitter: t.topPowerHitter, topContactHitter: t.topContactHitter,
+    missingStarters: t.missingStarters ?? [],
   })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -954,6 +955,18 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
               </div>
             ))}
           </div>
+
+          {(matchup.home?.missingStarters?.length > 0 || matchup.away?.missingStarters?.length > 0) && (
+            <div className="rounded-xl bg-red-500/10 ring-1 ring-red-500/30 px-4 py-3">
+              <p className="fs-9 uppercase tracking-wider text-red-400 font-semibold mb-1">Ausencia detectada</p>
+              {matchup.away?.missingStarters?.length > 0 && (
+                <p className="fs-10 text-white/60">{matchup.away.abbr}: {matchup.away.missingStarters.join(", ")} no aparece en el roster activo de hoy (posible lesión/ausencia) — el modelo ya aplicó una penalización a su ofensiva esperada.</p>
+              )}
+              {matchup.home?.missingStarters?.length > 0 && (
+                <p className="fs-10 text-white/60 mt-1">{matchup.home.abbr}: {matchup.home.missingStarters.join(", ")} no aparece en el roster activo de hoy (posible lesión/ausencia) — el modelo ya aplicó una penalización a su ofensiva esperada.</p>
+              )}
+            </div>
+          )}
 
           {matchup.weather && (
             <div className="rounded-xl bg-white-02 ring-1 ring-white/5 px-4 py-3 flex items-center justify-between">

@@ -1139,7 +1139,14 @@ function ReportsPanel({ entries }) {
           </div>
 
           {report.length === 0 ? (
-            <p className="fs-10 text-white/30 leading-relaxed">Sin apuestas liquidadas (Ganada/Perdida/Push) todavía para generar un reporte.</p>
+            (() => {
+              const settledWithoutDate = entries.filter(e => (e.result === "won" || e.result === "lost" || e.result === "push") && !e.dateISO).length;
+              return settledWithoutDate > 0 ? (
+                <p className="fs-10 text-white/30 leading-relaxed">Tienes {settledWithoutDate} apuesta(s) liquidada(s) registradas antes de que existiera el cotejo por fecha — cuentan en el Balance/ROI general de la Bitácora, pero no aparecen aquí. Las que registres de ahora en adelante sí van a aparecer.</p>
+              ) : (
+                <p className="fs-10 text-white/30 leading-relaxed">Sin apuestas liquidadas (Ganada/Perdida/Push) todavía para generar un reporte.</p>
+              );
+            })()
           ) : (
             <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
               {report.map((r) => (

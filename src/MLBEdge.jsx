@@ -128,6 +128,7 @@ function normalizeGamesFromPipeline(payload, teamsById) {
       venue: g.venue ?? null,
       autoOdds: g.autoOdds ?? null,
       autoProps: g.autoProps ?? [],
+      lineMovement: g.lineMovement ?? [],
     };
   }).filter(Boolean);
 }
@@ -1005,6 +1006,23 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
             </div>
           )}
 
+          {matchup.lineMovement?.length > 0 && (
+            <div className="rounded-xl bg-cyan-400/10 ring-1 ring-cyan-400/30 px-4 py-3">
+              <p className="fs-9 uppercase tracking-wider text-cyan-300 font-semibold mb-1.5">Movimiento de línea desde la corrida anterior</p>
+              <div className="space-y-1">
+                {matchup.lineMovement.map((m, i) => {
+                  const sideLabel = m.side === "home" ? matchup.home.abbr : m.side === "away" ? matchup.away.abbr : "";
+                  return (
+                    <p key={i} className="fs-10 text-white/60">
+                      {m.market}{sideLabel ? ` ${sideLabel}` : ""}: {m.fromProb}% → {m.toProb}%
+                      <span className="font-mono font-bold ml-1.5" style={{ color: m.deltaPct > 0 ? "#00FFB2" : "#FF3D71" }}>{m.deltaPct > 0 ? "+" : ""}{m.deltaPct}pp</span>
+                    </p>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {matchup.weather && (
             <div className="rounded-xl bg-white-02 ring-1 ring-white/5 px-4 py-3 flex items-center justify-between">
               <div>
@@ -1583,6 +1601,7 @@ export default function MLBEdge() {
         homeStarter: g.homeStarter, awayStarter: g.awayStarter, weather: g.weather,
         gamePk: g.gamePk,
         autoPropsFromOdds: g.autoProps ?? [],
+        lineMovement: g.lineMovement ?? [],
       };
       newMatchups.push(m);
       const ao = g.autoOdds;

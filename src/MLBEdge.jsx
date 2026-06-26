@@ -97,6 +97,11 @@ function normalizeGamesFromPipeline(payload, teamsById) {
       timeLabel: time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
       dateStr: g.gameDateStr ?? g.gameDate?.slice(0, 10),
       home, away,
+      homeStarter: g.homeStarter ?? null,
+      awayStarter: g.awayStarter ?? null,
+      weather: g.weather ?? null,
+      venue: g.venue ?? null,
+      autoOdds: g.autoOdds ?? null,
     };
   }).filter(Boolean);
 }
@@ -166,6 +171,50 @@ function noVigProb(probSide, probOtherSide) {
 // ---------------------------------------------------------------------------
 // MODELO — juego completo + F5 (primeras 5 entradas) como cálculo separado.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// MODELO — ensemble de señales reales, no heurística de un solo número.
+// Componentes y peso aproximado en puntos Elo:
+//   1. Elo de equipo (temporada)              — base
+//   2. Splits home/away                        — ajuste de contexto
+//   3. Forma reciente (últimos 10)              — ajuste de momentum
+//   4. ABRIDOR (ERA/WHIP/K9 del día)            — peso fuerte, ~igual o mayor
+//      que el Elo de equipo; la literatura de apuestas deportivas es clara en
+//      que el abridor puede hacer favorito a un equipo inferior (Odds Shark:
+//      "an average team with a stud pitcher is often favored against a
+//      superior team"). Liga promedio ERA ≈ 4.20.
+//   5. BULLPEN (ERA de staff como proxy)        — peso menor, entra el 6to+
+//   6. CLIMA (viento, temperatura)               — afecta sobre todo el TOTAL
+//      de carreras, no tanto quién gana; viento de salida sube el total,
+//      viento de entrada lo baja, frío reduce ofensiva.
+// ---------------------------------------------------------------------------
+function pitcherScore(starter) {
+  if (!starter || starter.era == null) return 0;
+  const leagueEra = 4.20;
+  const leagueWhip = 1.30;
+  const leagueK9 = 8.5;
+  const eraAdj = (leagueEra - starter.era) * 55;   // peso dominante
+  const whipAdj = (leagueWhip - (starter.whip ?? leagueWhip)) * 70;
+  const k9Adj = ((starter.k9 ?? leagueK9) - leagueK9) * 5;
+  return eraAdj + whipAdj + k9Adj;
+}
+
+function weatherRunFactor(weather) {
+  if (!weather) return 1.0;
+  let factor = 1.0;
+  // viento: dirección 0-360°, aproximamos "de salida" como soplando hacia el
+  // jardín central (rango amplio 200-340°) y "de entrada" lo opuesto.
+  if (weather.windMph >= 8) {
+    if (weather.windDirDeg >= 200 && weather.windDirDeg <= 340) factor += 0.05;
+    else if (weather.windDirDeg <= 60 || weather.windDirDeg >= 300) factor -= 0.04;
+  }
+  if (weather.tempF != null) {
+    if (weather.tempF > 85) factor += 0.025;
+    if (weather.tempF < 50) factor -= 0.03;
+  }
+  if (weather.precipProb != null && weather.precipProb > 50) factor -= 0.02;
+  return factor;
+}
+
 function buildModel(matchup) {
   const { home, away } = matchup;
 
@@ -178,11 +227,23 @@ function buildModel(matchup) {
   const formAdj = (((home.last10 ?? 5) - (away.last10 ?? 5)) / 10) * 70;
   diff += formAdj;
 
+  // Abridor: si el abridor LOCAL es mejor, suma a favor del local, y viceversa.
+  const homeSP = pitcherScore(matchup.homeStarter);
+  const awaySP = pitcherScore(matchup.awayStarter);
+  diff += homeSP - awaySP;
+
+  // Bullpen (proxy de ERA de staff completo) — peso menor que el abridor.
+  const bullpenAdj = ((away.staffEra ?? 4.0) - (home.staffEra ?? 4.0)) * 18;
+  diff += bullpenAdj;
+
   const homeWinProb = eloWinProb(diff);
 
   const leagueAvgTotal = 8.6;
   const offenseFactor = ((home.runsPerGame ?? 4.3) + (away.runsPerGame ?? 4.3)) / 8.6;
-  let projectedTotal = leagueAvgTotal * (0.55 * offenseFactor + 0.45);
+  const pitchingFactor = ((matchup.homeStarter?.era ?? 4.2) + (matchup.awayStarter?.era ?? 4.2)) / 8.4;
+  let projectedTotal = leagueAvgTotal * (0.45 * offenseFactor + 0.35 * pitchingFactor + 0.20);
+  const wFactor = weatherRunFactor(matchup.weather);
+  projectedTotal *= wFactor;
   projectedTotal *= matchup.parkFactor ?? 1.0;
 
   const expectedMargin = (diff / 400) * 1.4;
@@ -210,6 +271,7 @@ function buildModel(matchup) {
     homeIsFavorite,
     favMinus1_5,
     dogPlus1_5,
+    weatherFactor: wFactor,
     f5: {
       homeWinProb: f5HomeWinProb,
       awayWinProb: 1 - f5HomeWinProb,
@@ -273,6 +335,94 @@ function summarizeLog(entries) {
     totalStaked, totalProfit,
     roi: totalStaked > 0 ? (totalProfit / totalStaked) * 100 : null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// COTEJO AUTOMÁTICO — compara una apuesta registrada contra el resultado
+// final real del juego (vía pipeline). Limitación honesta: el F5 (primeras
+// 5 entradas) NO se puede cotejar automáticamente porque MLB Stats API no
+// expone el score parcial de 5 entradas de forma confiable en este pipeline
+// — esas entradas se quedan en "pending" para que el usuario las marque a mano.
+function gradeEntry(entry, resultsByGamePk) {
+  if (entry.isF5) return null; // no cotejable automáticamente
+  if (!entry.gamePk) return null;
+  const r = resultsByGamePk[entry.gamePk];
+  if (!r || r.homeScore == null || r.awayScore == null) return null;
+
+  const homeWon = r.homeScore > r.awayScore;
+  const margin = r.homeScore - r.awayScore; // positivo = ganó el local
+  const totalRuns = r.homeScore + r.awayScore;
+
+  if (entry.betType === "ML") {
+    const sideWon = entry.side === "home" ? homeWon : !homeWon;
+    if (r.homeScore === r.awayScore) return null; // no hay empates en MLB, pero por seguridad
+    return sideWon ? "won" : "lost";
+  }
+
+  if (entry.betType === "RL") {
+    // line ya viene con signo: -1.5 para el lado que da puntos, +1.5 para el que recibe
+    const sideMargin = entry.side === "home" ? margin : -margin;
+    const covered = sideMargin + entry.line > 0;
+    const pushed = sideMargin + entry.line === 0; // no debería pasar con .5, pero por seguridad
+    if (pushed) return "push";
+    return covered ? "won" : "lost";
+  }
+
+  if (entry.betType === "Total") {
+    if (entry.line == null) return null;
+    if (totalRuns === entry.line) return "push";
+    const overHit = totalRuns > entry.line;
+    const sideWon = entry.side === "over" ? overHit : !overHit;
+    return sideWon ? "won" : "lost";
+  }
+
+  return null; // props y otros tipos no estructurados se cotejan a mano
+}
+
+function autoGradeLog(entries, resultsByGamePk) {
+  return entries.map(e => {
+    if (e.result && e.result !== "pending") return e; // ya tiene resultado manual, no lo tocamos
+    const graded = gradeEntry(e, resultsByGamePk);
+    return graded ? { ...e, result: graded, autoGraded: true } : e;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// REPORTES — agregación de la bitácora por día/semana/mes.
+// ---------------------------------------------------------------------------
+function getWeekKey(dateISO) {
+  const d = new Date(dateISO + "T12:00:00");
+  const day = d.getDay() || 7; // lunes=1 ... domingo=7
+  const monday = new Date(d);
+  monday.setDate(d.getDate() - day + 1);
+  return monday.toISOString().slice(0, 10);
+}
+
+function getMonthKey(dateISO) {
+  return dateISO.slice(0, 7); // YYYY-MM
+}
+
+function buildReport(entries, period) {
+  const settled = entries.filter(e => (e.result === "won" || e.result === "lost" || e.result === "push") && e.dateISO);
+  const groups = {};
+  for (const e of settled) {
+    const key = period === "day" ? e.dateISO : period === "week" ? getWeekKey(e.dateISO) : getMonthKey(e.dateISO);
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(e);
+  }
+  return Object.entries(groups)
+    .map(([key, group]) => {
+      const staked = group.reduce((s, e) => s + Number(e.stake || 0), 0);
+      const profit = group.reduce((s, e) => s + profitForEntry(e), 0);
+      const wins = group.filter(e => e.result === "won").length;
+      const losses = group.filter(e => e.result === "lost").length;
+      return {
+        key, count: group.length, wins, losses,
+        staked, profit,
+        roi: staked > 0 ? (profit / staked) * 100 : null,
+      };
+    })
+    .sort((a, b) => b.key.localeCompare(a.key));
 }
 
 function parsePropsText(text) {
@@ -393,9 +543,9 @@ function BetRow({ label, prob, oddsValue, edge, onOddsChange, bankroll, onLog, l
   );
 }
 
-function RunLineSection({ model, oddsKeyFav, oddsKeyDog, odds, setOdds, homeAbbr, awayAbbr, bankroll, onLog, logContext, line = 1.5 }) {
+function RunLineSection({ model, oddsKeyFav, oddsKeyDog, invertedKey = "rlInverted", odds, setOdds, homeAbbr, awayAbbr, bankroll, onLog, logContext, line = 1.5 }) {
   const modelFavIsHome = model.homeIsFavorite;
-  const inverted = !!odds.rlInverted;
+  const inverted = !!odds[invertedKey];
   const favIsHome = inverted ? !modelFavIsHome : modelFavIsHome;
 
   const favAbbr = favIsHome ? homeAbbr : awayAbbr;
@@ -411,7 +561,7 @@ function RunLineSection({ model, oddsKeyFav, oddsKeyDog, odds, setOdds, homeAbbr
       <div className="flex items-center justify-between mb-2">
         <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold">Run line ±{line}</p>
         <button
-          onClick={() => setOdds({ ...odds, rlInverted: !inverted })}
+          onClick={() => setOdds({ ...odds, [invertedKey]: !inverted })}
           className="fs-9 text-white/30 font-mono flex items-center gap-1"
           title="Invertir favorito/desvalido si el mercado real difiere del modelo"
         >
@@ -419,8 +569,8 @@ function RunLineSection({ model, oddsKeyFav, oddsKeyDog, odds, setOdds, homeAbbr
         </button>
       </div>
       <div className="space-y-1.5">
-        <BetRow label={`${favAbbr} -${line}`} prob={favProb} oddsValue={odds[oddsKeyFav]} edge={favEdge} onOddsChange={(v) => setOdds({ ...odds, [oddsKeyFav]: v })} bankroll={bankroll} onLog={onLog} logContext={{ ...logContext, market: `Run Line -${line}` }} bothSidesFilled={!!(odds[oddsKeyFav] && odds[oddsKeyDog])} />
-        <BetRow label={`${dogAbbr} +${line}`} prob={dogProb} oddsValue={odds[oddsKeyDog]} edge={dogEdge} onOddsChange={(v) => setOdds({ ...odds, [oddsKeyDog]: v })} bankroll={bankroll} onLog={onLog} logContext={{ ...logContext, market: `Run Line +${line}` }} bothSidesFilled={!!(odds[oddsKeyFav] && odds[oddsKeyDog])} />
+        <BetRow label={`${favAbbr} -${line}`} prob={favProb} oddsValue={odds[oddsKeyFav]} edge={favEdge} onOddsChange={(v) => setOdds({ ...odds, [oddsKeyFav]: v })} bankroll={bankroll} onLog={onLog} logContext={{ ...logContext, market: `Run Line -${line}`, betType: "RL", side: favIsHome ? "home" : "away", line: -line, isF5: line === 0.5 }} bothSidesFilled={!!(odds[oddsKeyFav] && odds[oddsKeyDog])} />
+        <BetRow label={`${dogAbbr} +${line}`} prob={dogProb} oddsValue={odds[oddsKeyDog]} edge={dogEdge} onOddsChange={(v) => setOdds({ ...odds, [oddsKeyDog]: v })} bankroll={bankroll} onLog={onLog} logContext={{ ...logContext, market: `Run Line +${line}`, betType: "RL", side: favIsHome ? "away" : "home", line: line, isF5: line === 0.5 }} bothSidesFilled={!!(odds[oddsKeyFav] && odds[oddsKeyDog])} />
       </div>
     </div>
   );
@@ -589,7 +739,14 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
   const model = buildModel(matchup);
   const autoProps = suggestPropsFromPipeline(matchup);
   const matchupLabel = `${matchup.away.abbr} @ ${matchup.home.abbr}`;
-  const logContext = { matchup: matchupLabel };
+  const logContext = {
+    matchup: matchupLabel,
+    gamePk: matchup.gamePk ?? null,
+    homeTeamId: matchup.home.id ?? null,
+    awayTeamId: matchup.away.id ?? null,
+    homeAbbr: matchup.home.abbr,
+    awayAbbr: matchup.away.abbr,
+  };
 
   const mlHomeEdge = edgePct(model.homeWinProb, odds.mlHome);
   const mlAwayEdge = edgePct(model.awayWinProb, odds.mlAway);
@@ -624,6 +781,44 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
         </div>
 
         <div className="p-5 space-y-5">
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { abbr: matchup.away.abbr, sp: matchup.awayStarter },
+              { abbr: matchup.home.abbr, sp: matchup.homeStarter },
+            ].map((x, i) => (
+              <div key={i} className="rounded-lg bg-white-02 ring-1 ring-white/5 px-3 py-2.5">
+                <p className="fs-9 uppercase tracking-wider text-white/35 font-semibold mb-1">Abridor {x.abbr}</p>
+                {x.sp?.name ? (
+                  <>
+                    <p className="text-sm font-bold text-brand truncate">{x.sp.name}</p>
+                    {x.sp.era != null ? (
+                      <p className="fs-9 font-mono text-white/45 mt-0.5">ERA {x.sp.era} · WHIP {x.sp.whip ?? "—"} · K9 {x.sp.k9 ?? "—"}</p>
+                    ) : (
+                      <p className="fs-9 text-white/30 mt-0.5">Sin stats de temporada aún</p>
+                    )}
+                  </>
+                ) : (
+                  <p className="fs-9 text-white/30">Por confirmar</p>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {matchup.weather && (
+            <div className="rounded-lg bg-white-02 ring-1 ring-white/5 px-3 py-2.5 flex items-center justify-between">
+              <div>
+                <p className="fs-9 uppercase tracking-wider text-white/35 font-semibold mb-1">Clima en venue</p>
+                <p className="fs-10 font-mono text-white/50">
+                  {matchup.weather.tempF != null ? `${matchup.weather.tempF}°F` : "—"} · viento {matchup.weather.windMph ?? "—"} mph
+                  {matchup.weather.precipProb != null ? ` · ${matchup.weather.precipProb}% lluvia` : ""}
+                </p>
+              </div>
+              <span className={`fs-10 font-mono font-bold ${model.weatherFactor > 1.01 ? "text-green" : model.weatherFactor < 0.99 ? "text-red" : "text-white/30"}`}>
+                {model.weatherFactor > 1 ? "+" : ""}{((model.weatherFactor - 1) * 100).toFixed(1)}% al total
+              </span>
+            </div>
+          )}
+
           <div>
             <div className="flex items-center justify-between mb-2">
               <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold">Moneyline</p>
@@ -632,8 +827,8 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
               </button>
             </div>
             <div className="space-y-1.5">
-              <BetRow label={matchup.away.abbr} prob={model.awayWinProb} oddsValue={odds.mlAway} edge={mlAwayEdge} onOddsChange={(v) => setOdds({ ...odds, mlAway: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "Moneyline" }} bothSidesFilled={!!(odds.mlAway && odds.mlHome)} />
-              <BetRow label={matchup.home.abbr} prob={model.homeWinProb} oddsValue={odds.mlHome} edge={mlHomeEdge} onOddsChange={(v) => setOdds({ ...odds, mlHome: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "Moneyline" }} bothSidesFilled={!!(odds.mlAway && odds.mlHome)} />
+              <BetRow label={matchup.away.abbr} prob={model.awayWinProb} oddsValue={odds.mlAway} edge={mlAwayEdge} onOddsChange={(v) => setOdds({ ...odds, mlAway: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "Moneyline", betType: "ML", side: "away" }} bothSidesFilled={!!(odds.mlAway && odds.mlHome)} />
+              <BetRow label={matchup.home.abbr} prob={model.homeWinProb} oddsValue={odds.mlHome} edge={mlHomeEdge} onOddsChange={(v) => setOdds({ ...odds, mlHome: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "Moneyline", betType: "ML", side: "home" }} bothSidesFilled={!!(odds.mlAway && odds.mlHome)} />
             </div>
             {matchup.mlCompareOpen && (
               <div className="mt-2">
@@ -658,8 +853,8 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
               <input type="text" inputMode="decimal" value={odds.totalLine ?? ""} onChange={(e) => setOdds({ ...odds, totalLine: e.target.value })} placeholder="8.5" className="w-16 bg-input ring-1 ring-white/10 focus-ring-green rounded px-1.5 py-1 text-center font-mono text-xs text-brand placeholder:text-white/20" />
             </div>
             <div className="space-y-1.5">
-              <BetRow label="Over" prob={overProb ?? 0.5} oddsValue={odds.over} edge={overEdge} onOddsChange={(v) => setOdds({ ...odds, over: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total ${odds.totalLine || ""}` }} bothSidesFilled={!!(odds.over && odds.under)} />
-              <BetRow label="Under" prob={underProb ?? 0.5} oddsValue={odds.under} edge={underEdge} onOddsChange={(v) => setOdds({ ...odds, under: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total ${odds.totalLine || ""}` }} bothSidesFilled={!!(odds.over && odds.under)} />
+              <BetRow label="Over" prob={overProb ?? 0.5} oddsValue={odds.over} edge={overEdge} onOddsChange={(v) => setOdds({ ...odds, over: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total ${odds.totalLine || ""}`, betType: "Total", side: "over", line: odds.totalLine ? Number(odds.totalLine) : null }} bothSidesFilled={!!(odds.over && odds.under)} />
+              <BetRow label="Under" prob={underProb ?? 0.5} oddsValue={odds.under} edge={underEdge} onOddsChange={(v) => setOdds({ ...odds, under: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total ${odds.totalLine || ""}`, betType: "Total", side: "under", line: odds.totalLine ? Number(odds.totalLine) : null }} bothSidesFilled={!!(odds.over && odds.under)} />
             </div>
           </div>
 
@@ -673,11 +868,11 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
                 <div>
                   <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold mb-2">Moneyline F5</p>
                   <div className="space-y-1.5">
-                    <BetRow label={matchup.away.abbr} prob={model.f5.awayWinProb} oddsValue={odds.f5MlAway} edge={f5MlAwayEdge} onOddsChange={(v) => setOdds({ ...odds, f5MlAway: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "ML F5" }} bothSidesFilled={!!(odds.f5MlAway && odds.f5MlHome)} />
-                    <BetRow label={matchup.home.abbr} prob={model.f5.homeWinProb} oddsValue={odds.f5MlHome} edge={f5MlHomeEdge} onOddsChange={(v) => setOdds({ ...odds, f5MlHome: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "ML F5" }} bothSidesFilled={!!(odds.f5MlAway && odds.f5MlHome)} />
+                    <BetRow label={matchup.away.abbr} prob={model.f5.awayWinProb} oddsValue={odds.f5MlAway} edge={f5MlAwayEdge} onOddsChange={(v) => setOdds({ ...odds, f5MlAway: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "ML F5", betType: "ML", side: "away", isF5: true }} bothSidesFilled={!!(odds.f5MlAway && odds.f5MlHome)} />
+                    <BetRow label={matchup.home.abbr} prob={model.f5.homeWinProb} oddsValue={odds.f5MlHome} edge={f5MlHomeEdge} onOddsChange={(v) => setOdds({ ...odds, f5MlHome: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "ML F5", betType: "ML", side: "home", isF5: true }} bothSidesFilled={!!(odds.f5MlAway && odds.f5MlHome)} />
                   </div>
                 </div>
-                <RunLineSection model={model.f5} oddsKeyFav="f5RlFav" oddsKeyDog="f5RlDog" odds={odds} setOdds={setOdds} homeAbbr={matchup.home.abbr} awayAbbr={matchup.away.abbr} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "RL F5" }} line={0.5} />
+                <RunLineSection model={model.f5} oddsKeyFav="f5RlFav" oddsKeyDog="f5RlDog" invertedKey="f5RlInverted" odds={odds} setOdds={setOdds} homeAbbr={matchup.home.abbr} awayAbbr={matchup.away.abbr} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "RL F5" }} line={0.5} />
                 <div>
                   <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold mb-2">Total F5 — modelo {model.f5.projectedTotal.toFixed(1)}</p>
                   <div className="flex items-center gap-2 mb-2">
@@ -685,8 +880,8 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
                     <input type="text" inputMode="decimal" value={odds.f5TotalLine ?? ""} onChange={(e) => setOdds({ ...odds, f5TotalLine: e.target.value })} placeholder="4.5" className="w-16 bg-input ring-1 ring-white/10 focus-ring-green rounded px-1.5 py-1 text-center font-mono text-xs text-brand placeholder:text-white/20" />
                   </div>
                   <div className="space-y-1.5">
-                    <BetRow label="Over" prob={f5OverProb ?? 0.5} oddsValue={odds.f5Over} edge={f5OverEdge} onOddsChange={(v) => setOdds({ ...odds, f5Over: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total F5 ${odds.f5TotalLine || ""}` }} bothSidesFilled={!!(odds.f5Over && odds.f5Under)} />
-                    <BetRow label="Under" prob={f5UnderProb ?? 0.5} oddsValue={odds.f5Under} edge={f5UnderEdge} onOddsChange={(v) => setOdds({ ...odds, f5Under: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total F5 ${odds.f5TotalLine || ""}` }} bothSidesFilled={!!(odds.f5Over && odds.f5Under)} />
+                    <BetRow label="Over" prob={f5OverProb ?? 0.5} oddsValue={odds.f5Over} edge={f5OverEdge} onOddsChange={(v) => setOdds({ ...odds, f5Over: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total F5 ${odds.f5TotalLine || ""}`, betType: "Total", side: "over", line: odds.f5TotalLine ? Number(odds.f5TotalLine) : null, isF5: true }} bothSidesFilled={!!(odds.f5Over && odds.f5Under)} />
+                    <BetRow label="Under" prob={f5UnderProb ?? 0.5} oddsValue={odds.f5Under} edge={f5UnderEdge} onOddsChange={(v) => setOdds({ ...odds, f5Under: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total F5 ${odds.f5TotalLine || ""}`, betType: "Total", side: "under", line: odds.f5TotalLine ? Number(odds.f5TotalLine) : null, isF5: true }} bothSidesFilled={!!(odds.f5Over && odds.f5Under)} />
                   </div>
                 </div>
               </div>
@@ -696,7 +891,7 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
           <PropsPanel value={matchup.propsText} onChange={(v) => setMatchup({ ...matchup, propsText: v })} autoProps={autoProps} onLog={onAddToLog} logContext={logContext} bankroll={bankroll} />
 
           <p className="fs-9 text-white/25 leading-relaxed pt-2 border-top-white-04">
-            Momios en decimal. RL asigna -1.5/+1.5 según el favorito del modelo — usa ⇄ si el mercado real lo tiene invertido. El tier (BET/LEAN/FADE) y el monto de Kelly solo aparecen cuando metes el momio de <strong>ambos</strong> lados del mercado. BET ≥6% edge, LEAN ≥2.5%, FADE &lt;-2.5%.
+            Modelo: Elo de equipo + abridor (ERA/WHIP/K9) + bullpen + splits + forma reciente + clima. Momios en decimal. RL asigna -1.5/+1.5 según el favorito del modelo — usa ⇄ si el mercado real lo tiene invertido. El tier (BET/LEAN/FADE) y el monto de Kelly solo aparecen cuando metes el momio de <strong>ambos</strong> lados del mercado. BET ≥6% edge, LEAN ≥2.5%, FADE &lt;-2.5%. Las apuestas de juego completo (ML/RL/Total) se cotejan solas con el resultado final; las de F5 se marcan a mano porque no hay score parcial confiable.
           </p>
         </div>
       </div>
@@ -720,27 +915,49 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
       const favAbbr = favIsHome ? m.home.abbr : m.away.abbr;
       const dogAbbr = favIsHome ? m.away.abbr : m.home.abbr;
       const matchupLabel = `${m.away.abbr} @ ${m.home.abbr}`;
+
+      const f5ModelFavIsHome = model.f5.homeIsFavorite;
+      const f5Inverted = !!odds.f5RlInverted;
+      const f5FavIsHome = f5Inverted ? !f5ModelFavIsHome : f5ModelFavIsHome;
+      const f5FavAbbr = f5FavIsHome ? m.home.abbr : m.away.abbr;
+      const f5DogAbbr = f5FavIsHome ? m.away.abbr : m.home.abbr;
+
+      const totalDiff = odds.totalLine !== "" && odds.totalLine !== undefined ? model.projectedTotal - Number(odds.totalLine) : null;
+      const overProb = totalDiff !== null ? 0.5 + Math.min(Math.max(totalDiff, 0) * 0.09, 0.30) : null;
+      const underProb = totalDiff !== null ? 0.5 + Math.min(Math.max(-totalDiff, 0) * 0.09, 0.30) : null;
+
       const candidates = [
         { label: `ML ${m.home.abbr}`, prob: model.homeWinProb, odd: odds.mlHome, matchup: matchupLabel, otherOdd: odds.mlAway },
         { label: `ML ${m.away.abbr}`, prob: model.awayWinProb, odd: odds.mlAway, matchup: matchupLabel, otherOdd: odds.mlHome },
         { label: `${favAbbr} -1.5`, prob: model.favMinus1_5, odd: odds.rlFav, matchup: matchupLabel, otherOdd: odds.rlDog },
         { label: `${dogAbbr} +1.5`, prob: model.dogPlus1_5, odd: odds.rlDog, matchup: matchupLabel, otherOdd: odds.rlFav },
+        { label: "Over " + (odds.totalLine || ""), prob: overProb, odd: odds.over, matchup: matchupLabel, otherOdd: odds.under },
+        { label: "Under " + (odds.totalLine || ""), prob: underProb, odd: odds.under, matchup: matchupLabel, otherOdd: odds.over },
+        { label: `ML F5 ${m.home.abbr}`, prob: model.f5.homeWinProb, odd: odds.f5MlHome, matchup: matchupLabel, otherOdd: odds.f5MlAway },
+        { label: `ML F5 ${m.away.abbr}`, prob: model.f5.awayWinProb, odd: odds.f5MlAway, matchup: matchupLabel, otherOdd: odds.f5MlHome },
+        { label: `${f5FavAbbr} -0.5 F5`, prob: model.f5.favMinus0_5, odd: odds.f5RlFav, matchup: matchupLabel, otherOdd: odds.f5RlDog },
+        { label: `${f5DogAbbr} +0.5 F5`, prob: model.f5.dogPlus0_5, odd: odds.f5RlDog, matchup: matchupLabel, otherOdd: odds.f5RlFav },
       ];
       for (const c of candidates) {
-        if (!c.odd || !c.otherOdd) continue; // requiere ambos lados del mercado, no solo uno
+        if (!c.odd || !c.otherOdd || c.prob === null || c.prob === undefined) continue; // requiere ambos lados del mercado
         const e = edgePct(c.prob, c.odd);
-        if (e === null) continue;
+        if (e === null || Number.isNaN(e)) continue;
         if (!top || e > top.edge) top = { ...c, edge: e };
       }
     }
     return top;
   }, [matchups, oddsMap]);
 
+  // "Apuesta Máxima" solo se muestra cuando el mejor candidato alcanza tier BET (≥6%).
+  // Si el mejor edge disponible no llega a ese umbral, es honesto decir que hoy
+  // no hay una apuesta lo bastante fuerte, en vez de forzar una recomendación.
+  const isMaxBet = best && edgeTier(best.edge)?.label === "BET";
+
   if (!best) {
     return (
       <div className="rounded-xl bg-white-02 ring-1 ring-white/5 px-4 py-4 flex items-start gap-2.5">
         <AlertCircle size={16} className="text-white/30 shrink-0 mt-0.5" />
-        <p className="text-sm text-white/40 leading-relaxed">Ingresa momios en algún cruce para ver el pick del día aquí.</p>
+        <p className="text-sm text-white/40 leading-relaxed">Ingresa momios en algún cruce para ver la apuesta máxima del día aquí.</p>
       </div>
     );
   }
@@ -749,7 +966,7 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
     <div className="rounded-xl relative overflow-hidden ring-1 ring-amber-400/30 px-5 py-5 bg-amber-grad">
       <div className="flex items-center gap-2 mb-3">
         <Trophy size={15} className="text-amber-300" />
-        <span className="font-display fs-10 uppercase tracking-widest font-bold text-amber-300/90">Pick del día</span>
+        <span className="font-display fs-10 uppercase tracking-widest font-bold text-amber-300/90">Apuesta Máxima</span>
       </div>
       <p className="font-display text-2xl font-bold text-brand leading-tight tracking-wide">{best.label}</p>
       <p className="text-sm text-white/40 mt-1">{best.matchup} · momio {Number(best.odd).toFixed(2)}</p>
@@ -764,6 +981,9 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
           <p className="text-sm text-white/35 mt-3">¼ Kelly: <span className="text-amber-200 font-mono">${stake.toFixed(0)}</span> sobre ${Number(bankroll).toLocaleString()}</p>
         ) : null;
       })()}
+      {!isMaxBet && (
+        <p className="fs-9 text-white/30 mt-3 leading-relaxed italic">Este es el mejor edge disponible hoy, pero no alcanza el umbral BET (≥6%) — trátalo como referencia, no como una apuesta "segura".</p>
+      )}
     </div>
   );
 }
@@ -845,7 +1065,7 @@ function BetLogPanel({ entries, setEntries }) {
               <div key={entry.id} className="rounded-lg bg-white-02 px-2.5 py-2">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <p className="text-xs font-bold text-brand truncate">{entry.label}</p>
+                    <p className="text-xs font-bold text-brand truncate">{entry.label} {entry.autoGraded && <CheckCircle2 size={10} className="inline text-green ml-1" />}</p>
                     <p className="fs-9 text-white/40 truncate">{entry.matchup} · {entry.market} · {Number(entry.odds).toFixed(2)}</p>
                     <p className="fs-9 text-white/30">${Number(entry.stake).toFixed(0)} · {entry.date}</p>
                   </div>
@@ -877,7 +1097,73 @@ function BetLogPanel({ entries, setEntries }) {
 }
 
 // ---------------------------------------------------------------------------
-// MAIN APP — layout de 2 paneles: sidebar fijo + grilla principal
+// REPORTS PANEL — vista diaria/semanal/mensual de la bitácora
+// ---------------------------------------------------------------------------
+function ReportsPanel({ entries }) {
+  const [open, setOpen] = useState(false);
+  const [period, setPeriod] = useState("day");
+  const report = useMemo(() => buildReport(entries, period), [entries, period]);
+
+  const formatKey = (key) => {
+    if (period === "day") {
+      const d = new Date(key + "T12:00:00");
+      return d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+    }
+    if (period === "week") {
+      const d = new Date(key + "T12:00:00");
+      return `Semana del ${d.toLocaleDateString([], { day: "numeric", month: "short" })}`;
+    }
+    const [y, m] = key.split("-");
+    return new Date(`${key}-01T12:00:00`).toLocaleDateString([], { month: "long", year: "numeric" });
+  };
+
+  return (
+    <div className="rounded-xl bg-card ring-1 ring-white-06 p-4">
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between">
+        <span className="font-display text-sm font-bold tracking-wide">Reportes</span>
+        {open ? <ChevronUp size={14} className="text-white/40" /> : <ChevronDown size={14} className="text-white/40" />}
+      </button>
+
+      {open && (
+        <div className="mt-3 space-y-3">
+          <div className="flex gap-1.5">
+            {[{ k: "day", l: "Diario" }, { k: "week", l: "Semanal" }, { k: "month", l: "Mensual" }].map(p => (
+              <button
+                key={p.k}
+                onClick={() => setPeriod(p.k)}
+                className={`flex-1 fs-9 font-bold uppercase tracking-wide py-1.5 rounded-lg transition-all ${period === p.k ? "text-green bg-green-chip-10 ring-1 ring-green-30" : "text-white/40 bg-white-02 ring-1 ring-white/10"}`}
+              >
+                {p.l}
+              </button>
+            ))}
+          </div>
+
+          {report.length === 0 ? (
+            <p className="fs-10 text-white/30 leading-relaxed">Sin apuestas liquidadas (Ganada/Perdida/Push) todavía para generar un reporte.</p>
+          ) : (
+            <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+              {report.map((r) => (
+                <div key={r.key} className="rounded-lg bg-white-02 px-2.5 py-2">
+                  <div className="flex items-center justify-between">
+                    <p className="fs-10 font-bold text-brand">{formatKey(r.key)}</p>
+                    <span className={`fs-10 font-mono font-bold ${r.profit > 0 ? "text-green" : r.profit < 0 ? "text-red" : "text-white/30"}`}>
+                      {r.profit > 0 ? "+" : ""}${r.profit.toFixed(0)}
+                    </span>
+                  </div>
+                  <p className="fs-9 text-white/35 mt-0.5">
+                    {r.count} apuesta(s) · {r.wins}G-{r.losses}P · ROI {r.roi !== null ? `${r.roi > 0 ? "+" : ""}${r.roi.toFixed(1)}%` : "—"}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 // ---------------------------------------------------------------------------
 let nextId = 1;
 function emptyMatchup() {
@@ -894,7 +1180,14 @@ export default function MLBEdge() {
   useEffect(() => { saveBetLog(betLog); }, [betLog]);
 
   const handleAddToLog = useCallback((bet) => {
-    const entry = { id: `${Date.now()}-${Math.round(Math.random() * 1000)}`, date: new Date().toLocaleDateString(), result: "pending", ...bet };
+    const now = new Date();
+    const entry = {
+      id: `${Date.now()}-${Math.round(Math.random() * 1000)}`,
+      date: now.toLocaleDateString(),
+      dateISO: now.toISOString().slice(0, 10),
+      result: "pending",
+      ...bet,
+    };
     setBetLog((prev) => [...prev, entry]);
   }, []);
 
@@ -906,6 +1199,7 @@ export default function MLBEdge() {
   const [availableDates, setAvailableDates] = useState([]);
   const [selectedDate, setSelectedDate] = useState(null);
   const [calendarLoadedId, setCalendarLoadedId] = useState(null);
+  const [autoGradedCount, setAutoGradedCount] = useState(0);
 
   const loadPipeline = useCallback(async () => {
     if (!DATA_JSON_URL) { setPipelineStatus("no-url"); return; }
@@ -923,6 +1217,20 @@ export default function MLBEdge() {
       setSelectedDate((prev) => prev && dates.includes(prev) ? prev : dates[0]);
       setPipelineMeta({ generatedAt: payload.generatedAt, date: payload.date });
       setPipelineStatus("ok");
+
+      // Cotejo automático: si el pipeline trae resultados finales de ayer,
+      // los usamos para marcar Ganada/Perdida/Push en la bitácora sola.
+      const resultsByGamePk = Object.fromEntries(
+        (payload.results ?? []).map(r => [r.gamePk, r])
+      );
+      if (Object.keys(resultsByGamePk).length) {
+        setBetLog((prev) => {
+          const graded = autoGradeLog(prev, resultsByGamePk);
+          const newlyGraded = graded.filter((g, i) => g.autoGraded && prev[i]?.result !== g.result).length;
+          if (newlyGraded > 0) setAutoGradedCount(newlyGraded);
+          return graded;
+        });
+      }
     } catch (e) {
       console.error(e);
       setPipelineErrorMsg(e?.message || String(e));
@@ -941,7 +1249,41 @@ export default function MLBEdge() {
   const loadCalendarForDate = (dateStr) => {
     const games = autoGames.filter(g => g.dateStr === dateStr);
     if (!games.length) return;
-    setMatchups(games.map(g => ({ ...emptyMatchup(), home: g.home, away: g.away, timeLabel: g.timeLabel })));
+    const newMatchups = [];
+    const newOddsMap = {};
+
+    for (const g of games) {
+      const m = {
+        ...emptyMatchup(),
+        home: g.home,
+        away: g.away,
+        timeLabel: g.timeLabel,
+        homeStarter: g.homeStarter,
+        awayStarter: g.awayStarter,
+        weather: g.weather,
+        gamePk: g.gamePk,
+      };
+      newMatchups.push(m);
+
+      const ao = g.autoOdds;
+      if (ao) {
+        const model = buildModel(m);
+        const homeIsFav = model.homeIsFavorite;
+        newOddsMap[m.id] = {
+          mlHome: ao.mlHome ?? "",
+          mlAway: ao.mlAway ?? "",
+          over: ao.totalOverPrice ?? "",
+          under: ao.totalUnderPrice ?? "",
+          totalLine: ao.totalPoint ?? "",
+          rlFav: homeIsFav ? (ao.rlHomePrice ?? "") : (ao.rlAwayPrice ?? ""),
+          rlDog: homeIsFav ? (ao.rlAwayPrice ?? "") : (ao.rlHomePrice ?? ""),
+          autoOddsLoaded: true,
+        };
+      }
+    }
+
+    setMatchups(newMatchups);
+    setOddsMap(newOddsMap);
     setCalendarLoadedId(dateStr);
   };
 
@@ -1061,6 +1403,7 @@ export default function MLBEdge() {
 
           <PickOfDay matchups={matchups} oddsMap={oddsMap} bankroll={bankroll} />
           <BetLogPanel entries={betLog} setEntries={setBetLog} />
+          <ReportsPanel entries={betLog} />
         </div>
 
         <div>

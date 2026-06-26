@@ -1203,7 +1203,7 @@ function BetLogTab({ entries, setEntries }) {
           <p className="text-sm text-white/35">{entries.length === 0 ? "Sin apuestas registradas todavía. Usa el botón + junto a cualquier momio." : "Ninguna apuesta coincide con esos filtros."}</p>
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))" }}>
           {filtered.map((entry) => (
             <div key={entry.id} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3">
               <div className="flex items-start justify-between gap-3">
@@ -1214,7 +1214,7 @@ function BetLogTab({ entries, setEntries }) {
                 </div>
                 <button onClick={() => removeEntry(entry.id)} className="text-white/25 fs-11 shrink-0">✕</button>
               </div>
-              <div className="flex items-center gap-1.5 mt-2.5">
+              <div className="flex items-center gap-1.5 mt-2.5 flex-wrap">
                 <ResultButton active={!entry.result || entry.result === "pending"} color="#9CA3AF" onClick={() => updateEntry(entry.id, { result: "pending" })}>Pend</ResultButton>
                 <ResultButton active={entry.result === "won"} color="#00FFB2" onClick={() => updateEntry(entry.id, { result: "won" })}>Ganada</ResultButton>
                 <ResultButton active={entry.result === "lost"} color="#FF3D71" onClick={() => updateEntry(entry.id, { result: "lost" })}>Perdida</ResultButton>
@@ -1228,7 +1228,7 @@ function BetLogTab({ entries, setEntries }) {
         </div>
       )}
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 max-w-md">
         <button onClick={exportLog} className="flex-1 fs-10 font-bold uppercase text-white/50 bg-card ring-1 ring-white-06 rounded-lg py-2.5">Exportar</button>
         <label className="flex-1 fs-10 font-bold uppercase text-white/50 bg-card ring-1 ring-white-06 rounded-lg py-2.5 text-center cursor-pointer">
           Importar
@@ -1286,7 +1286,7 @@ function ReportsTab({ entries }) {
           )}
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
           {report.map((r) => (
             <div key={r.key} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3.5">
               <div className="flex items-center justify-between">
@@ -1337,68 +1337,70 @@ function ModelHealthTab({ entries }) {
         </div>
       )}
 
-      <div>
-        <h3 className="font-display text-sm font-bold tracking-wide text-white/60 uppercase mb-3">Win rate por mercado</h3>
-        <div className="space-y-2">
-          {health.byMarket.map((m) => (
-            <div key={m.key} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 flex items-center justify-between">
-              <div className="flex items-center">
-                <span className="text-sm font-bold text-brand">{m.key}</span>
-                <SampleBadge sufficient={m.sufficient} />
-              </div>
-              <div className="text-right">
-                <span className="font-mono text-base font-bold" style={{ color: m.winRate >= 50 ? "#00FFB2" : "#FF3D71" }}>{m.winRate.toFixed(0)}%</span>
-                <span className="fs-9 text-white/30 ml-2">{m.wins}G-{m.losses}P</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div>
-        <h3 className="font-display text-sm font-bold tracking-wide text-white/60 uppercase mb-3">Win rate por tier de edge</h3>
-        <div className="space-y-2">
-          {health.byTier.map((t) => (
-            <div key={t.key} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 flex items-center justify-between">
-              <div className="flex items-center">
-                <TierChip edge={t.key === "BET" ? 10 : t.key === "LEAN" ? 4 : t.key === "FADE" ? -10 : 0} />
-                <SampleBadge sufficient={t.sufficient} />
-              </div>
-              <div className="text-right">
-                <span className="font-mono text-base font-bold" style={{ color: t.winRate >= 50 ? "#00FFB2" : "#FF3D71" }}>{t.winRate.toFixed(0)}%</span>
-                <span className="fs-9 text-white/30 ml-2">{t.wins}G-{t.losses}P</span>
-              </div>
-            </div>
-          ))}
-        </div>
-        <p className="fs-9 text-white/30 mt-2 leading-relaxed">Si BET no le pega claramente mejor que LEAN o PASS, el umbral de tier podría necesitar ajuste — pero espera a tener muestra suficiente antes de decidir.</p>
-      </div>
-
-      <div>
-        <h3 className="font-display text-sm font-bold tracking-wide text-white/60 uppercase mb-3">Calibración del modelo</h3>
-        <div className="space-y-2">
-          {health.calibration.map((c) => {
-            const bandCenter = c.label === "50-60%" ? 55 : c.label === "60-70%" ? 65 : 75;
-            const diff = c.winRate !== null ? c.winRate - bandCenter : null;
-            return (
-              <div key={c.label} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 flex items-center justify-between">
+      <div className="grid gap-6" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))" }}>
+        <div>
+          <h3 className="font-display text-sm font-bold tracking-wide text-white/60 uppercase mb-3">Win rate por mercado</h3>
+          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
+            {health.byMarket.map((m) => (
+              <div key={m.key} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 flex items-center justify-between">
                 <div className="flex items-center">
-                  <span className="text-sm font-bold text-brand">Modelo dice {c.label}</span>
-                  <SampleBadge sufficient={c.sufficient} />
+                  <span className="text-sm font-bold text-brand">{m.key}</span>
+                  <SampleBadge sufficient={m.sufficient} />
                 </div>
                 <div className="text-right">
-                  <span className="font-mono text-base font-bold text-brand">{c.winRate?.toFixed(0)}% real</span>
-                  {diff !== null && (
-                    <span className="fs-9 ml-2" style={{ color: Math.abs(diff) <= 8 ? "#00FFB2" : "#FF3D71" }}>
-                      {diff > 0 ? "+" : ""}{diff.toFixed(0)}pp vs banda
-                    </span>
-                  )}
+                  <span className="font-mono text-base font-bold" style={{ color: m.winRate >= 50 ? "#00FFB2" : "#FF3D71" }}>{m.winRate.toFixed(0)}%</span>
+                  <span className="fs-9 text-white/30 ml-2">{m.wins}G-{m.losses}P</span>
                 </div>
               </div>
-            );
-          })}
+            ))}
+          </div>
         </div>
-        <p className="fs-9 text-white/30 mt-2 leading-relaxed">Si el modelo dice "65%" y en la realidad gana mucho menos (ej. 45%), está sobreconfiado en esa banda. Si gana mucho más, está siendo tímido.</p>
+
+        <div>
+          <h3 className="font-display text-sm font-bold tracking-wide text-white/60 uppercase mb-3">Win rate por tier de edge</h3>
+          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
+            {health.byTier.map((t) => (
+              <div key={t.key} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 flex items-center justify-between">
+                <div className="flex items-center">
+                  <TierChip edge={t.key === "BET" ? 10 : t.key === "LEAN" ? 4 : t.key === "FADE" ? -10 : 0} />
+                  <SampleBadge sufficient={t.sufficient} />
+                </div>
+                <div className="text-right">
+                  <span className="font-mono text-base font-bold" style={{ color: t.winRate >= 50 ? "#00FFB2" : "#FF3D71" }}>{t.winRate.toFixed(0)}%</span>
+                  <span className="fs-9 text-white/30 ml-2">{t.wins}G-{t.losses}P</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="fs-9 text-white/30 mt-2 leading-relaxed">Si BET no le pega claramente mejor que LEAN o PASS, el umbral de tier podría necesitar ajuste — pero espera a tener muestra suficiente antes de decidir.</p>
+        </div>
+
+        <div>
+          <h3 className="font-display text-sm font-bold tracking-wide text-white/60 uppercase mb-3">Calibración del modelo</h3>
+          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
+            {health.calibration.map((c) => {
+              const bandCenter = c.label === "50-60%" ? 55 : c.label === "60-70%" ? 65 : 75;
+              const diff = c.winRate !== null ? c.winRate - bandCenter : null;
+              return (
+                <div key={c.label} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 flex items-center justify-between">
+                  <div className="flex items-center">
+                    <span className="text-sm font-bold text-brand">Modelo dice {c.label}</span>
+                    <SampleBadge sufficient={c.sufficient} />
+                  </div>
+                  <div className="text-right">
+                    <span className="font-mono text-base font-bold text-brand">{c.winRate?.toFixed(0)}% real</span>
+                    {diff !== null && (
+                      <span className="fs-9 ml-2" style={{ color: Math.abs(diff) <= 8 ? "#00FFB2" : "#FF3D71" }}>
+                        {diff > 0 ? "+" : ""}{diff.toFixed(0)}pp vs banda
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <p className="fs-9 text-white/30 mt-2 leading-relaxed">Si el modelo dice "65%" y en la realidad gana mucho menos (ej. 45%), está sobreconfiado en esa banda. Si gana mucho más, está siendo tímido.</p>
+        </div>
       </div>
     </div>
   );
@@ -1673,9 +1675,9 @@ export default function MLBEdge() {
         </>
       )}
 
-      {activeTab === "log" && <div className="px-6 py-6 max-w-4xl mx-auto"><BetLogTab entries={betLog} setEntries={setBetLog} /></div>}
-      {activeTab === "reports" && <div className="px-6 py-6 max-w-3xl mx-auto"><ReportsTab entries={betLog} /></div>}
-      {activeTab === "health" && <div className="px-6 py-6 max-w-3xl mx-auto"><ModelHealthTab entries={betLog} /></div>}
+      {activeTab === "log" && <div className="px-6 py-6"><BetLogTab entries={betLog} setEntries={setBetLog} /></div>}
+      {activeTab === "reports" && <div className="px-6 py-6"><ReportsTab entries={betLog} /></div>}
+      {activeTab === "health" && <div className="px-6 py-6"><ModelHealthTab entries={betLog} /></div>}
 
       {openMatchup && (
         <MatchupDetailPanel

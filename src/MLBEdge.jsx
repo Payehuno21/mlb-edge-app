@@ -1225,7 +1225,15 @@ function BetLogTab({ entries, setEntries }) {
   const [search, setSearch] = useState("");
   const [resultFilter, setResultFilter] = useState("all");
   const [marketFilter, setMarketFilter] = useState("all");
-  const summary = useMemo(() => summarizeLog(entries), [entries]);
+  const [simFilter, setSimFilter] = useState("real"); // "real" | "sim" | "all" — default real para ver siempre tu dinero real primero
+
+  const scopedEntries = useMemo(() => {
+    if (simFilter === "all") return entries;
+    if (simFilter === "sim") return entries.filter(e => e.isSimulation);
+    return entries.filter(e => !e.isSimulation);
+  }, [entries, simFilter]);
+
+  const summary = useMemo(() => summarizeLog(scopedEntries), [scopedEntries]);
 
   const updateEntry = (id, patch) => setEntries((prev) => prev.map(e => e.id === id ? { ...e, ...patch } : e));
   const removeEntry = (id) => setEntries((prev) => prev.filter(e => e.id !== id));
@@ -1254,12 +1262,12 @@ function BetLogTab({ entries, setEntries }) {
   };
 
   const marketTypes = useMemo(() => {
-    const types = new Set(entries.map(e => e.betType).filter(Boolean));
+    const types = new Set(scopedEntries.map(e => e.betType).filter(Boolean));
     return Array.from(types);
-  }, [entries]);
+  }, [scopedEntries]);
 
   const filtered = useMemo(() => {
-    return [...entries].reverse().filter(e => {
+    return [...scopedEntries].reverse().filter(e => {
       if (resultFilter !== "all" && (e.result || "pending") !== resultFilter) return false;
       if (marketFilter !== "all" && e.betType !== marketFilter) return false;
       if (search.trim()) {
@@ -1269,10 +1277,25 @@ function BetLogTab({ entries, setEntries }) {
       }
       return true;
     });
-  }, [entries, search, resultFilter, marketFilter]);
+  }, [scopedEntries, search, resultFilter, marketFilter]);
 
   return (
     <div className="space-y-5">
+      <div className="flex gap-2">
+        {[{ k: "real", l: "Reales" }, { k: "sim", l: "Simulación" }, { k: "all", l: "Todas" }].map(opt => (
+          <button
+            key={opt.k}
+            onClick={() => setSimFilter(opt.k)}
+            className="flex-1 fs-10 font-bold uppercase tracking-wide py-2.5 rounded-lg transition-all"
+            style={simFilter === opt.k
+              ? { color: "#00FFB2", background: "rgba(0,255,178,0.1)", boxShadow: "0 0 0 1px rgba(0,255,178,0.3) inset" }
+              : { color: "rgba(255,255,255,0.4)", background: "rgba(255,255,255,0.03)", boxShadow: "0 0 0 1px rgba(255,255,255,0.08) inset" }}
+          >
+            {opt.l}
+          </button>
+        ))}
+      </div>
+
       <div className="grid grid-cols-4 gap-3">
         <div className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 text-center">
           <p className="fs-9 text-white/35 uppercase tracking-wide">Apostado</p>
@@ -1325,7 +1348,7 @@ function BetLogTab({ entries, setEntries }) {
             <div key={entry.id} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-sm font-bold text-brand truncate flex items-center gap-1.5">{entry.label} {entry.autoGraded && <CheckCircle2 size={12} className="text-accent" />}</p>
+                  <p className="text-sm font-bold text-brand truncate flex items-center gap-1.5">{entry.label} {entry.autoGraded && <CheckCircle2 size={12} className="text-accent" />} {entry.isSimulation && <span className="fs-9 font-bold text-amber-300 bg-amber-400/10 px-1.5 py-0.5 rounded">SIM</span>}</p>
                   <p className="fs-10 text-white/40 truncate mt-0.5">{entry.matchup} · {entry.market} · {Number(entry.odds).toFixed(2)}</p>
                   <p className="fs-9 text-white/30 mt-0.5">${Number(entry.stake).toFixed(0)} · {entry.date}</p>
                 </div>
@@ -1361,7 +1384,13 @@ function BetLogTab({ entries, setEntries }) {
 // ---------------------------------------------------------------------------
 function ReportsTab({ entries }) {
   const [period, setPeriod] = useState("day");
-  const report = useMemo(() => buildReport(entries, period), [entries, period]);
+  const [simFilter, setSimFilter] = useState("real");
+  const scopedEntries = useMemo(() => {
+    if (simFilter === "all") return entries;
+    if (simFilter === "sim") return entries.filter(e => e.isSimulation);
+    return entries.filter(e => !e.isSimulation);
+  }, [entries, simFilter]);
+  const report = useMemo(() => buildReport(scopedEntries, period), [scopedEntries, period]);
 
   const formatKey = (key) => {
     if (period === "day") {
@@ -1375,7 +1404,7 @@ function ReportsTab({ entries }) {
     return new Date(`${key}-01T12:00:00`).toLocaleDateString([], { month: "long", year: "numeric" });
   };
 
-  const settledWithoutDate = entries.filter(e => (e.result === "won" || e.result === "lost" || e.result === "push") && !e.dateISO).length;
+  const settledWithoutDate = scopedEntries.filter(e => (e.result === "won" || e.result === "lost" || e.result === "push") && !e.dateISO).length;
 
   return (
     <div className="space-y-5">
@@ -1390,6 +1419,21 @@ function ReportsTab({ entries }) {
               : { color: "rgba(255,255,255,0.4)", background: "rgba(255,255,255,0.03)", boxShadow: "0 0 0 1px rgba(255,255,255,0.08) inset" }}
           >
             {p.l}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex gap-2">
+        {[{ k: "real", l: "Reales" }, { k: "sim", l: "Simulación" }, { k: "all", l: "Todas" }].map(opt => (
+          <button
+            key={opt.k}
+            onClick={() => setSimFilter(opt.k)}
+            className="flex-1 fs-10 font-bold uppercase tracking-wide py-2.5 rounded-lg transition-all"
+            style={simFilter === opt.k
+              ? { color: "#00FFB2", background: "rgba(0,255,178,0.1)", boxShadow: "0 0 0 1px rgba(0,255,178,0.3) inset" }
+              : { color: "rgba(255,255,255,0.4)", background: "rgba(255,255,255,0.03)", boxShadow: "0 0 0 1px rgba(255,255,255,0.08) inset" }}
+          >
+            {opt.l}
           </button>
         ))}
       </div>
@@ -1434,13 +1478,14 @@ function SampleBadge({ sufficient }) {
 }
 
 function ModelHealthTab({ entries }) {
-  const health = useMemo(() => analyzeModelHealth(entries), [entries]);
+  const realEntries = useMemo(() => entries.filter(e => !e.isSimulation), [entries]);
+  const health = useMemo(() => analyzeModelHealth(realEntries), [realEntries]);
 
   if (health.totalSettled === 0) {
     return (
       <div className="rounded-xl bg-card ring-1 ring-white-06 px-5 py-10 text-center">
         <Activity size={28} className="text-white/20 mx-auto mb-3" />
-        <p className="text-sm text-white/40 leading-relaxed max-w-sm mx-auto">Sin apuestas Ganadas/Perdidas todavía. En cuanto cotejes resultados (automático o a mano), aquí vas a ver qué tan bien le está pegando el modelo.</p>
+        <p className="text-sm text-white/40 leading-relaxed max-w-sm mx-auto">Sin apuestas Ganadas/Perdidas todavía (no se cuentan las de simulación). En cuanto cotejes resultados (automático o a mano), aquí vas a ver qué tan bien le está pegando el modelo.</p>
       </div>
     );
   }
@@ -1542,6 +1587,8 @@ export default function MLBEdge() {
 
   useEffect(() => { saveBetLog(betLog); }, [betLog]);
 
+  const [simulationMode, setSimulationMode] = useState(false);
+
   const handleAddToLog = useCallback((bet) => {
     const now = new Date();
     const entry = {
@@ -1549,10 +1596,11 @@ export default function MLBEdge() {
       date: now.toLocaleDateString(),
       dateISO: now.toISOString().slice(0, 10),
       result: "pending",
+      isSimulation: simulationMode,
       ...bet,
     };
     setBetLog((prev) => [...prev, entry]);
-  }, []);
+  }, [simulationMode]);
 
   const [pipelineStatus, setPipelineStatus] = useState(DATA_JSON_URL ? "loading" : "no-url");
   const [pipelineErrorMsg, setPipelineErrorMsg] = useState("");
@@ -1676,6 +1724,11 @@ export default function MLBEdge() {
             <p className="fs-9 text-white/35 mt-1 tracking-wide">TEMPORADA 2026 · PIPELINE AUTÓNOMO{autoGames.length > 0 ? ` · ${autoGames.length} JUEGOS` : ""}</p>
           </div>
           <div className="flex items-center gap-2.5">
+            {simulationMode && (
+              <span className="fs-9 font-bold uppercase text-amber-300 bg-amber-400/10 ring-1 ring-amber-400/40 px-3 py-1.5 rounded-full flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-300" /> Simulación ON
+              </span>
+            )}
             {pipelineStatus === "ok" && pipelineMeta?.generatedAt && (
               <span className="fs-9 text-white/30 font-mono hidden sm:inline">
                 {pipelineMeta.lastMode === "refresh" ? "Abridores/momios actualizados" : "Última corrida completa"} {new Date(pipelineMeta.generatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
@@ -1751,6 +1804,18 @@ export default function MLBEdge() {
                   </div>
                 </div>
               </div>
+              <button
+                onClick={() => setSimulationMode(!simulationMode)}
+                className="w-full rounded-2xl p-4 flex items-center justify-between transition-all"
+                style={simulationMode
+                  ? { background: "rgba(255,178,0,0.10)", boxShadow: "0 0 0 1px rgba(255,178,0,0.4) inset" }
+                  : { background: "#0D0F14", boxShadow: "0 0 0 1px rgba(255,255,255,0.07) inset" }}
+              >
+                <span className="fs-10 uppercase tracking-wider font-semibold" style={{ color: simulationMode ? "#FFB200" : "rgba(255,255,255,0.4)" }}>
+                  {simulationMode ? "● Modo simulación ON" : "Modo simulación OFF"}
+                </span>
+                <span className="fs-9 text-white/30">{simulationMode ? "nuevas apuestas no cuentan como reales" : "tap para activar"}</span>
+              </button>
               <PickOfDay matchups={matchups} oddsMap={oddsMap} bankroll={bankroll} />
             </div>
 

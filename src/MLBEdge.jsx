@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
-import { RefreshCw, ChevronDown, ChevronUp, AlertCircle, Trophy, Info, Pencil, CheckCircle2, Flame } from "lucide-react";
+import { RefreshCw, ChevronDown, ChevronUp, AlertCircle, Trophy, Info, Pencil, CheckCircle2, Flame, Search, Activity, ListChecks, LayoutGrid } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // MLB EDGE — v5
@@ -22,6 +22,29 @@ const TEAM_COLORS = {
   SEA:"#0C2C56", STL:"#C41E3A", TB:"#8FBCE6", TEX:"#003278", TOR:"#134A8E",
   WSH:"#AB0003"
 };
+
+// Logos oficiales de MLB vía el CDN público mlbstatic.com, indexados por
+// team id (el mismo id que usa MLB Stats API en todo el pipeline).
+function teamLogoUrl(teamId) {
+  if (!teamId) return null;
+  return `https://www.mlbstatic.com/team-logos/${teamId}.svg`;
+}
+
+function TeamLogo({ teamId, size = 20 }) {
+  const [failed, setFailed] = useState(false);
+  const url = teamLogoUrl(teamId);
+  if (!url || failed) return null;
+  return (
+    <img
+      src={url}
+      alt=""
+      width={size}
+      height={size}
+      onError={() => setFailed(true)}
+      style={{ objectFit: "contain", flexShrink: 0 }}
+    />
+  );
+}
 
 const TEAMS_FALLBACK = [
   { abbr: "TB",  name: "Tampa Bay Rays",          winPct: 0.643, elo: 1586 },
@@ -436,9 +459,79 @@ function parsePropsText(text) {
   }).filter(Boolean).slice(0, 6);
 }
 
+// ---------------------------------------------------------------------------
+// SALUD DEL MODELO — mide el desempeño real del modelo contra resultados ya
+// liquidados en la bitácora. No ajusta nada solo; solo te muestra la verdad
+// de los números para que TÚ decidas si algo necesita revisión. Con pocas
+// muestras (<30) el resultado es ruido estadístico, no señal — se marca
+// explícitamente para no generar falsa confianza.
+// ---------------------------------------------------------------------------
+const MIN_SAMPLE_SIZE = 30;
+
+function analyzeModelHealth(entries) {
+  const settled = entries.filter(e => e.result === "won" || e.result === "lost");
+
+  const byGroup = (keyFn) => {
+    const groups = {};
+    for (const e of settled) {
+      const key = keyFn(e);
+      if (!key) continue;
+      if (!groups[key]) groups[key] = { wins: 0, losses: 0 };
+      if (e.result === "won") groups[key].wins++;
+      else groups[key].losses++;
+    }
+    return Object.entries(groups).map(([key, g]) => ({
+      key,
+      wins: g.wins,
+      losses: g.losses,
+      total: g.wins + g.losses,
+      winRate: (g.wins / (g.wins + g.losses)) * 100,
+      sufficient: (g.wins + g.losses) >= MIN_SAMPLE_SIZE,
+    })).sort((a, b) => b.total - a.total);
+  };
+
+  const byMarket = byGroup(e => e.betType ?? (e.market?.split(" ")[0] ?? null));
+  const byTier = byGroup(e => {
+    if (e.edge === null || e.edge === undefined) return null;
+    return edgeTier(e.edge)?.label ?? null;
+  });
+
+  // Calibración: agrupa por bandas de probabilidad del modelo y compara contra
+  // el win rate real observado en esa banda. Una banda bien calibrada tiene
+  // winRate real ≈ centro de la banda.
+  const calibrationBands = [
+    { label: "50-60%", min: 0.5, max: 0.6 },
+    { label: "60-70%", min: 0.6, max: 0.7 },
+    { label: "70%+", min: 0.7, max: 1.01 },
+  ];
+  const calibration = calibrationBands.map(band => {
+    const inBand = settled.filter(e => e.prob != null && e.prob >= band.min && e.prob < band.max);
+    const wins = inBand.filter(e => e.result === "won").length;
+    return {
+      label: band.label,
+      total: inBand.length,
+      winRate: inBand.length ? (wins / inBand.length) * 100 : null,
+      sufficient: inBand.length >= MIN_SAMPLE_SIZE,
+    };
+  }).filter(b => b.total > 0);
+
+  return {
+    totalSettled: settled.length,
+    overallSufficient: settled.length >= MIN_SAMPLE_SIZE,
+    byMarket,
+    byTier,
+    calibration,
+  };
+}
+
 
 // ---------------------------------------------------------------------------
-// UI — componentes base
+// UI — componentes base. Paleta: fondo casi negro con tinte azulado (#06070A),
+// acento principal cian-verde neón (#00FFB2) con glow sutil, acento secundario
+// magenta para "pro/máxima" (#FF2E97), rojo-coral para negativo (#FF3D71).
+// Tipografía: Big Shoulders (títulos/badges) + Space Grotesk (cuerpo) +
+// JetBrains Mono (números). Glow usado como acento de borde/línea, nunca
+// detrás del texto, para no comprometer legibilidad.
 // ---------------------------------------------------------------------------
 function EdgeMeter({ value }) {
   const clamped = Math.max(-25, Math.min(25, value ?? 0));
@@ -452,7 +545,7 @@ function EdgeMeter({ value }) {
         style={{
           width: `${Math.abs(pct - 50)}%`,
           marginLeft: pct >= 50 ? "50%" : `${pct}%`,
-          background: positive ? "#39FF7A" : "#FF4655",
+          background: positive ? "#00FFB2" : "#FF3D71",
         }}
       />
     </div>
@@ -462,18 +555,20 @@ function EdgeMeter({ value }) {
 function TierChip({ edge, size = "sm" }) {
   const tier = edgeTier(edge);
   if (!tier) return null;
-  const sizeClasses = size === "lg" ? "text-xs px-2.5 py-1" : "fs-9 px-1.5 py-0.5";
+  const colorMap = { BET: "#00FFB2", LEAN: "#FFB200", PASS: "#6B7280", FADE: "#FF3D71" };
+  const color = colorMap[tier.label] ?? tier.color;
+  const sizeClasses = size === "lg" ? "text-xs px-3 py-1.5" : "fs-9 px-2 py-1";
   return (
     <span
-      className={`font-display font-bold uppercase tracking-wide rounded shrink-0 ${sizeClasses}`}
-      style={{ color: tier.color, background: `${tier.color}1A`, boxShadow: tier.glow ? `0 0 6px ${tier.color}55` : "none" }}
+      className={`font-display font-bold uppercase tracking-wide rounded-md shrink-0 ${sizeClasses}`}
+      style={{ color, background: `${color}1A`, boxShadow: tier.label === "BET" ? `0 0 10px ${color}55` : "none" }}
     >
       {tier.label}
     </span>
   );
 }
 
-function OddsInput({ value, onChange, placeholder = "1.91" }) {
+function OddsInput({ value, onChange, placeholder = "1.91", highlight }) {
   return (
     <input
       type="text"
@@ -481,7 +576,8 @@ function OddsInput({ value, onChange, placeholder = "1.91" }) {
       value={value ?? ""}
       onChange={(e) => onChange(e.target.value.replace(",", "."))}
       placeholder={placeholder}
-      className="w-[56px] bg-input ring-1 ring-white/10 focus-ring-green rounded px-1.5 py-1 text-center font-mono text-xs text-brand placeholder:text-white/20"
+      className="w-full bg-input ring-1 focus-ring-accent rounded-lg px-2 py-2 text-center font-mono text-sm text-brand placeholder:text-white/20 transition-all"
+      style={{ boxShadow: highlight ? "0 0 0 1px rgba(0,255,178,0.4) inset" : "0 0 0 1px rgba(255,255,255,0.1) inset" }}
     />
   );
 }
@@ -493,7 +589,7 @@ function TeamSelect({ value, onChange, exclude, label, teams }) {
       <select
         value={value?.abbr ?? ""}
         onChange={(e) => onChange(teams.find(t => t.abbr === e.target.value) ?? null)}
-        className="w-full bg-input ring-1 ring-white/10 focus-ring-green rounded-lg px-3 py-2.5 text-sm font-bold text-brand appearance-none"
+        className="w-full bg-input ring-1 ring-white/10 focus-ring-accent rounded-lg px-3 py-2.5 text-sm font-bold text-brand appearance-none"
       >
         <option value="">Equipo…</option>
         {teams.filter(t => t.abbr !== exclude).map(t => (
@@ -504,21 +600,26 @@ function TeamSelect({ value, onChange, exclude, label, teams }) {
   );
 }
 
-function BetRow({ label, prob, oddsValue, edge, onOddsChange, bankroll, onLog, logContext, dim, bothSidesFilled = true }) {
+// Fila de momio: columnas con ancho fijo y espacio real entre ellas, para que
+// el número del momio y el edge no compitan visualmente con la barra.
+function BetRow({ label, prob, oddsValue, edge, onOddsChange, bankroll, onLog, logContext, bothSidesFilled = true }) {
   const kelly = oddsValue ? kellyFraction(prob, oddsValue) : null;
   const stake = kelly && kelly > 0 && bankroll ? kelly * Number(bankroll) : null;
   const canLog = onLog && oddsValue;
   const showTier = oddsValue && bothSidesFilled;
+  const positive = (edge ?? 0) >= 0;
   return (
-    <div className={`grid items-center gap-2 ${dim ? "opacity-60" : ""}`} style={{ gridTemplateColumns: "52px 38px 56px 1fr 60px 44px 24px" }}>
-      <span className="text-sm font-bold text-brand truncate">{label}</span>
-      <span className="fs-10 font-mono text-white/40">{(prob * 100).toFixed(0)}%</span>
-      <OddsInput value={oddsValue} onChange={onOddsChange} />
-      <EdgeMeter value={showTier ? edge : null} />
-      <div className="flex flex-col items-end leading-tight">
+    <div className="grid items-center gap-3 py-2.5 border-b border-white/[0.04] last:border-b-0" style={{ gridTemplateColumns: "56px 1fr 84px 80px 40px" }}>
+      <span className="text-sm font-bold text-brand">{label}</span>
+      <div>
+        <div className="fs-9 text-white/35 mb-1">modelo {(prob * 100).toFixed(0)}%</div>
+        <EdgeMeter value={showTier ? edge : null} />
+      </div>
+      <OddsInput value={oddsValue} onChange={onOddsChange} highlight={showTier && positive} />
+      <div className="flex flex-col items-end gap-1">
         {showTier ? (
           <>
-            <span className={`fs-11 font-mono font-bold ${edge > 0 ? "text-green" : edge < 0 ? "text-red" : "text-white/30"}`}>
+            <span className="font-mono text-sm font-bold" style={{ color: positive ? "#00FFB2" : "#FF3D71" }}>
               {edge !== null && edge !== undefined && !Number.isNaN(edge) ? `${edge > 0 ? "+" : ""}${edge.toFixed(1)}%` : "—"}
             </span>
             <TierChip edge={edge} />
@@ -526,15 +627,15 @@ function BetRow({ label, prob, oddsValue, edge, onOddsChange, bankroll, onLog, l
         ) : oddsValue ? (
           <span className="fs-9 text-white/25 italic text-right">falta el otro lado</span>
         ) : (
-          <span className="fs-11 font-mono text-white/20">—</span>
+          <span className="font-mono text-sm text-white/20">—</span>
         )}
+        {stake && stake > 0 && showTier && <span className="fs-9 font-mono text-amber-300/80">${stake.toFixed(0)}</span>}
       </div>
-      <span className="fs-10 font-mono text-amber-300/80 text-right">{showTier && stake && stake > 0 ? `$${stake.toFixed(0)}` : ""}</span>
       {canLog ? (
         <button
           onClick={() => onLog({ ...logContext, label, prob, odds: oddsValue, edge, stake: stake ?? 0 })}
           title="Agregar a la bitácora"
-          className="w-6 h-6 rounded-full bg-green-chip-10 ring-1 ring-green-30 text-green text-sm font-bold flex items-center justify-center active:scale-90 transition-transform justify-self-end"
+          className="w-7 h-7 rounded-full bg-accent-chip ring-1 ring-accent-30 text-accent text-base font-bold flex items-center justify-center active:scale-90 transition-transform justify-self-end"
         >
           +
         </button>
@@ -555,22 +656,23 @@ function RunLineSection({ model, oddsKeyFav, oddsKeyDog, invertedKey = "rlInvert
 
   const favEdge = edgePct(favProb, odds[oddsKeyFav]);
   const dogEdge = edgePct(dogProb, odds[oddsKeyDog]);
+  const bothFilled = !!(odds[oddsKeyFav] && odds[oddsKeyDog]);
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex items-center justify-between mb-1">
         <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold">Run line ±{line}</p>
         <button
           onClick={() => setOdds({ ...odds, [invertedKey]: !inverted })}
-          className="fs-9 text-white/30 font-mono flex items-center gap-1"
+          className="fs-9 text-white/30 font-mono flex items-center gap-1 hover:text-white/50"
           title="Invertir favorito/desvalido si el mercado real difiere del modelo"
         >
           ⇄ {inverted ? "invertido" : "modelo"}
         </button>
       </div>
-      <div className="space-y-1.5">
-        <BetRow label={`${favAbbr} -${line}`} prob={favProb} oddsValue={odds[oddsKeyFav]} edge={favEdge} onOddsChange={(v) => setOdds({ ...odds, [oddsKeyFav]: v })} bankroll={bankroll} onLog={onLog} logContext={{ ...logContext, market: `Run Line -${line}`, betType: "RL", side: favIsHome ? "home" : "away", line: -line, isF5: line === 0.5 }} bothSidesFilled={!!(odds[oddsKeyFav] && odds[oddsKeyDog])} />
-        <BetRow label={`${dogAbbr} +${line}`} prob={dogProb} oddsValue={odds[oddsKeyDog]} edge={dogEdge} onOddsChange={(v) => setOdds({ ...odds, [oddsKeyDog]: v })} bankroll={bankroll} onLog={onLog} logContext={{ ...logContext, market: `Run Line +${line}`, betType: "RL", side: favIsHome ? "away" : "home", line: line, isF5: line === 0.5 }} bothSidesFilled={!!(odds[oddsKeyFav] && odds[oddsKeyDog])} />
+      <div>
+        <BetRow label={`${favAbbr} -${line}`} prob={favProb} oddsValue={odds[oddsKeyFav]} edge={favEdge} onOddsChange={(v) => setOdds({ ...odds, [oddsKeyFav]: v })} bankroll={bankroll} onLog={onLog} logContext={{ ...logContext, market: `Run Line -${line}` }} bothSidesFilled={bothFilled} />
+        <BetRow label={`${dogAbbr} +${line}`} prob={dogProb} oddsValue={odds[oddsKeyDog]} edge={dogEdge} onOddsChange={(v) => setOdds({ ...odds, [oddsKeyDog]: v })} bankroll={bankroll} onLog={onLog} logContext={{ ...logContext, market: `Run Line +${line}` }} bothSidesFilled={bothFilled} />
       </div>
     </div>
   );
@@ -591,19 +693,18 @@ function MarketCompare({ oddsA, oddsB, onChangeA, onChangeB, labelA, labelB }) {
   );
 
   return (
-    <div className="rounded-lg bg-white/[0.02] ring-1 ring-white/5 px-3 py-2.5 space-y-2">
+    <div className="rounded-lg bg-white/[0.02] ring-1 ring-white/5 px-3 py-3 space-y-2">
       <p className="fs-9 uppercase tracking-wider text-white/30 font-semibold">Comparar casas (sin vig)</p>
       <div className="grid items-center gap-2" style={{ gridTemplateColumns: "48px 1fr 56px" }}>
-        <span className="fs-10 font-bold text-white/60 truncate">{labelA}</span>
+        <span className="fs-10 font-bold text-white/60">{labelA}</span>
         {renderInputs(oddsA, onChangeA)}
         <span className="fs-10 font-mono text-amber-200 text-right">{fairA !== null ? `${(fairA * 100).toFixed(0)}%` : "—"}</span>
       </div>
       <div className="grid items-center gap-2" style={{ gridTemplateColumns: "48px 1fr 56px" }}>
-        <span className="fs-10 font-bold text-white/60 truncate">{labelB}</span>
+        <span className="fs-10 font-bold text-white/60">{labelB}</span>
         {renderInputs(oddsB, onChangeB)}
         <span className="fs-10 font-mono text-amber-200 text-right">{fairB !== null ? `${(fairB * 100).toFixed(0)}%` : "—"}</span>
       </div>
-      <p className="fs-9 text-white/25">% = probabilidad justa de mercado. Compárala con el % del modelo en cada fila.</p>
     </div>
   );
 }
@@ -617,7 +718,7 @@ function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll })
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
-        <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold flex items-center gap-1.5"><Flame size={12}/> Props {hasAuto && <CheckCircle2 size={12} className="text-green" />}</p>
+        <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold flex items-center gap-1.5"><Flame size={12}/> Props {hasAuto && <CheckCircle2 size={12} className="text-accent" />}</p>
         {!hasAuto && (
           <button onClick={() => setEditing(!editing)} className="flex items-center gap-1 fs-9 text-white/40 font-semibold uppercase">
             <Pencil size={10} /> {editing ? "listo" : "pegar"}
@@ -625,18 +726,18 @@ function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll })
         )}
       </div>
       {hasAuto ? (
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           {autoProps.map((p, i) => {
             const oddsVal = propOdds[i] ?? "";
             const stake = oddsVal && bankroll ? (kellyFraction(p.confidence / 100, oddsVal) ?? 0) * Number(bankroll) : null;
             return (
-              <div key={i} className="grid items-center gap-2" style={{ gridTemplateColumns: "1fr 40px 56px 40px 24px" }}>
+              <div key={i} className="grid items-center gap-2" style={{ gridTemplateColumns: "1fr 40px 64px 40px 28px" }}>
                 <span className="text-sm font-bold text-brand truncate">{p.player} <span className="text-white/40 font-normal">· {p.type}</span></span>
                 <span className="fs-10 font-mono text-amber-300 text-right">{p.confidence.toFixed(0)}%</span>
                 <OddsInput value={oddsVal} onChange={(v) => setPropOdds({ ...propOdds, [i]: v })} />
-                <span className="fs-10 font-mono text-amber-300/80 text-right">{stake && stake > 0 ? `$${stake.toFixed(0)}` : ""}</span>
+                <span className="fs-9 font-mono text-amber-300/80 text-right">{stake && stake > 0 ? `$${stake.toFixed(0)}` : ""}</span>
                 {onLog && oddsVal ? (
-                  <button onClick={() => onLog({ ...logContext, market: "Prop", label: `${p.player} · ${p.type}`, prob: p.confidence / 100, odds: oddsVal, edge: null, stake: stake ?? 0 })} className="w-6 h-6 rounded-full bg-green-chip-10 ring-1 ring-green-30 text-green text-sm font-bold flex items-center justify-center justify-self-end">+</button>
+                  <button onClick={() => onLog({ ...logContext, market: "Prop", label: `${p.player} · ${p.type}`, prob: p.confidence / 100, odds: oddsVal, edge: null, stake: stake ?? 0 })} className="w-6 h-6 rounded-full bg-accent-chip ring-1 ring-accent-30 text-accent text-sm font-bold flex items-center justify-center justify-self-end">+</button>
                 ) : <span />}
               </div>
             );
@@ -648,7 +749,7 @@ function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll })
           onChange={(e) => onChange(e.target.value)}
           placeholder={"Jugador | Tipo | Confianza%\nAaron Judge | HR | 28"}
           rows={3}
-          className="w-full bg-input ring-1 ring-white/10 focus-ring-green rounded-lg px-3 py-2 text-xs font-mono text-brand placeholder:text-white/20"
+          className="w-full bg-input ring-1 ring-white/10 focus-ring-accent rounded-lg px-3 py-2 text-xs font-mono text-brand placeholder:text-white/20"
         />
       ) : parsedManual.length > 0 ? (
         <div className="space-y-1">
@@ -667,14 +768,15 @@ function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll })
 }
 
 // ---------------------------------------------------------------------------
-// MATCHUP CARD COMPACT — vive en la grilla principal, solo lo esencial
+// MATCHUP CARD COMPACT — tarjeta de grilla con logos, más aire, momios en
+// su propia línea con número grande para que se lean de un vistazo.
 // ---------------------------------------------------------------------------
 function MatchupCardCompact({ matchup, odds, onOpen, onRemove, teams, setMatchup }) {
   const ready = matchup.home && matchup.away;
 
   if (!ready) {
     return (
-      <div className="rounded-xl bg-card ring-1 ring-white-06 p-4">
+      <div className="rounded-2xl bg-card ring-1 ring-white-06 p-4">
         <div className="flex gap-2 items-end">
           <TeamSelect label="Visitante" value={matchup.away} exclude={matchup.home?.abbr} onChange={(t) => setMatchup({ ...matchup, away: t })} teams={teams} />
           <span className="text-white/20 text-sm pb-2.5">@</span>
@@ -692,47 +794,47 @@ function MatchupCardCompact({ matchup, odds, onOpen, onRemove, teams, setMatchup
   const bestEdge = [mlHomeEdge, mlAwayEdge].filter(e => e !== null && !Number.isNaN(e));
   const topEdge = bestEdge.length ? Math.max(...bestEdge) : null;
   const tier = edgeTier(topEdge);
+  const accentColor = tier?.label === "BET" ? "#00FFB2" : tier?.label === "LEAN" ? "#FFB200" : null;
 
   return (
     <button
       onClick={onOpen}
-      className="rounded-xl bg-card ring-1 text-left p-4 transition-all hover:ring-white/20 relative group"
-      style={{ boxShadow: tier?.label === "BET" ? "0 0 0 1px rgba(57,255,122,0.35) inset" : "0 0 0 1px rgba(255,255,255,0.06) inset" }}
+      className="rounded-2xl bg-card text-left p-5 transition-all hover:ring-white/20 relative group overflow-hidden"
+      style={{ boxShadow: accentColor ? `0 0 0 1px ${accentColor}45 inset` : "0 0 0 1px rgba(255,255,255,0.06) inset" }}
     >
+      {accentColor && <div className="absolute top-0 left-0 w-[3px] h-full" style={{ background: `linear-gradient(180deg, ${accentColor}, #00D9FF)` }} />}
       <button
         onClick={(e) => { e.stopPropagation(); onRemove(); }}
-        className="absolute top-2.5 right-2.5 text-white/20 hover:text-white/50 text-sm opacity-0 group-hover:opacity-100 transition-opacity"
+        className="absolute top-3 right-3 text-white/20 hover:text-white/50 text-sm opacity-0 group-hover:opacity-100 transition-opacity z-10"
       >
         ✕
       </button>
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <span className="w-2.5 h-2.5 rounded-full" style={{ background: TEAM_COLORS[matchup.away.abbr] }} />
-          <span className="font-display text-lg font-bold tracking-wide leading-none">{matchup.away.abbr} <span className="text-white/30">@</span> {matchup.home.abbr}</span>
-          <span className="w-2.5 h-2.5 rounded-full" style={{ background: TEAM_COLORS[matchup.home.abbr] }} />
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2.5">
+          <TeamLogo teamId={matchup.away.id} size={22} />
+          <span className="font-display text-xl font-bold tracking-wide leading-none">{matchup.away.abbr} <span className="text-white/30 fs-11">@</span> {matchup.home.abbr}</span>
+          <TeamLogo teamId={matchup.home.id} size={22} />
         </div>
         {tier && <TierChip edge={topEdge} />}
       </div>
-      <p className="fs-10 font-mono text-white/30 mb-3">{matchup.timeLabel ?? ""} · Total proy. {model.projectedTotal.toFixed(1)}</p>
-      <div className="space-y-1.5">
-        <div className="grid items-center gap-2" style={{ gridTemplateColumns: "44px 1fr 50px" }}>
+      <p className="fs-10 font-mono text-white/30 mb-4">{matchup.timeLabel ?? ""} · total {model.projectedTotal.toFixed(1)}</p>
+      <div>
+        <div className="flex items-center justify-between py-2 border-t border-white/[0.05]">
           <span className="text-sm font-bold text-brand">{matchup.away.abbr}</span>
-          <EdgeMeter value={mlAwayEdge} />
-          <span className="fs-11 font-mono text-white/50 text-right">{odds.mlAway ? Number(odds.mlAway).toFixed(2) : "—"}</span>
+          <span className="font-mono text-lg font-bold" style={{ color: odds.mlAway ? "#9CA3AF" : "rgba(255,255,255,0.2)" }}>{odds.mlAway ? Number(odds.mlAway).toFixed(2) : "—"}</span>
         </div>
-        <div className="grid items-center gap-2" style={{ gridTemplateColumns: "44px 1fr 50px" }}>
+        <div className="flex items-center justify-between py-2 border-t border-white/[0.05]">
           <span className="text-sm font-bold text-brand">{matchup.home.abbr}</span>
-          <EdgeMeter value={mlHomeEdge} />
-          <span className="fs-11 font-mono text-white/50 text-right">{odds.mlHome ? Number(odds.mlHome).toFixed(2) : "—"}</span>
+          <span className="font-mono text-lg font-bold" style={{ color: odds.mlHome ? "#9CA3AF" : "rgba(255,255,255,0.2)" }}>{odds.mlHome ? Number(odds.mlHome).toFixed(2) : "—"}</span>
         </div>
       </div>
-      <p className="fs-9 text-white/25 mt-3 text-center">Click para ver RL · Total · F5 · props</p>
+      <p className="fs-9 text-white/25 mt-4 text-center">Ver RL · Total · F5 · props</p>
     </button>
   );
 }
 
 // ---------------------------------------------------------------------------
-// MATCHUP DETAIL PANEL — panel lateral con el análisis completo del cruce
+// MATCHUP DETAIL PANEL
 // ---------------------------------------------------------------------------
 function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankroll, onAddToLog }) {
   const [f5Open, setF5Open] = useState(false);
@@ -765,36 +867,36 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
   const f5MlAwayEdge = edgePct(model.f5.awayWinProb, odds.f5MlAway);
 
   return (
-    <div className="fixed inset-0 z-30 flex justify-end" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose}>
+    <div className="fixed inset-0 z-30 flex justify-end" style={{ background: "rgba(0,0,0,0.6)" }} onClick={onClose}>
       <div
         className="bg-app h-full overflow-y-auto"
-        style={{ width: "min(480px, 100%)", borderLeft: "1px solid rgba(255,255,255,0.08)" }}
+        style={{ width: "min(520px, 100%)", borderLeft: "1px solid rgba(255,255,255,0.08)" }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="sticky top-0 bg-header z-10 px-5 py-4 flex items-center justify-between" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
-          <div className="flex items-center gap-2.5">
-            <span className="w-3 h-3 rounded-full" style={{ background: TEAM_COLORS[matchup.away.abbr] }} />
-            <span className="font-display text-xl font-bold tracking-wide">{matchup.away.abbr} <span className="text-white/30">@</span> {matchup.home.abbr}</span>
-            <span className="w-3 h-3 rounded-full" style={{ background: TEAM_COLORS[matchup.home.abbr] }} />
+        <div className="sticky top-0 bg-header z-10 px-6 py-5 flex items-center justify-between" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+          <div className="flex items-center gap-3">
+            <TeamLogo teamId={matchup.away.id} size={26} />
+            <span className="font-display text-2xl font-bold tracking-wide">{matchup.away.abbr} <span className="text-white/30 fs-11">@</span> {matchup.home.abbr}</span>
+            <TeamLogo teamId={matchup.home.id} size={26} />
           </div>
-          <button onClick={onClose} className="text-white/40 hover:text-white text-xl leading-none px-2">✕</button>
+          <button onClick={onClose} className="text-white/40 hover:text-white text-2xl leading-none px-2">✕</button>
         </div>
 
-        <div className="p-5 space-y-5">
+        <div className="p-6 space-y-6">
           <div className="grid grid-cols-2 gap-3">
             {[
               { abbr: matchup.away.abbr, sp: matchup.awayStarter },
               { abbr: matchup.home.abbr, sp: matchup.homeStarter },
             ].map((x, i) => (
-              <div key={i} className="rounded-lg bg-white-02 ring-1 ring-white/5 px-3 py-2.5">
+              <div key={i} className="rounded-xl bg-white-02 ring-1 ring-white/5 px-4 py-3">
                 <p className="fs-9 uppercase tracking-wider text-white/35 font-semibold mb-1">Abridor {x.abbr}</p>
                 {x.sp?.name ? (
                   <>
                     <p className="text-sm font-bold text-brand truncate">{x.sp.name}</p>
                     {x.sp.era != null ? (
-                      <p className="fs-9 font-mono text-white/45 mt-0.5">ERA {x.sp.era} · WHIP {x.sp.whip ?? "—"} · K9 {x.sp.k9 ?? "—"}</p>
+                      <p className="fs-9 font-mono text-white/45 mt-1">ERA {x.sp.era} · WHIP {x.sp.whip ?? "—"} · K9 {x.sp.k9 ?? "—"}</p>
                     ) : (
-                      <p className="fs-9 text-white/30 mt-0.5">Sin stats de temporada aún</p>
+                      <p className="fs-9 text-white/30 mt-1">Sin stats de temporada aún</p>
                     )}
                   </>
                 ) : (
@@ -805,7 +907,7 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
           </div>
 
           {matchup.weather && (
-            <div className="rounded-lg bg-white-02 ring-1 ring-white/5 px-3 py-2.5 flex items-center justify-between">
+            <div className="rounded-xl bg-white-02 ring-1 ring-white/5 px-4 py-3 flex items-center justify-between">
               <div>
                 <p className="fs-9 uppercase tracking-wider text-white/35 font-semibold mb-1">Clima en venue</p>
                 <p className="fs-10 font-mono text-white/50">
@@ -813,20 +915,20 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
                   {matchup.weather.precipProb != null ? ` · ${matchup.weather.precipProb}% lluvia` : ""}
                 </p>
               </div>
-              <span className={`fs-10 font-mono font-bold ${model.weatherFactor > 1.01 ? "text-green" : model.weatherFactor < 0.99 ? "text-red" : "text-white/30"}`}>
+              <span className="fs-10 font-mono font-bold" style={{ color: model.weatherFactor > 1.01 ? "#00FFB2" : model.weatherFactor < 0.99 ? "#FF3D71" : "rgba(255,255,255,0.3)" }}>
                 {model.weatherFactor > 1 ? "+" : ""}{((model.weatherFactor - 1) * 100).toFixed(1)}% al total
               </span>
             </div>
           )}
 
           <div>
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center justify-between mb-1">
               <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold">Moneyline</p>
-              <button onClick={() => setMatchup({ ...matchup, mlCompareOpen: !matchup.mlCompareOpen })} className="fs-9 text-white/30 font-mono">
+              <button onClick={() => setMatchup({ ...matchup, mlCompareOpen: !matchup.mlCompareOpen })} className="fs-9 text-white/30 font-mono hover:text-white/50">
                 {matchup.mlCompareOpen ? "ocultar casas" : "+ comparar casas"}
               </button>
             </div>
-            <div className="space-y-1.5">
+            <div>
               <BetRow label={matchup.away.abbr} prob={model.awayWinProb} oddsValue={odds.mlAway} edge={mlAwayEdge} onOddsChange={(v) => setOdds({ ...odds, mlAway: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "Moneyline", betType: "ML", side: "away" }} bothSidesFilled={!!(odds.mlAway && odds.mlHome)} />
               <BetRow label={matchup.home.abbr} prob={model.homeWinProb} oddsValue={odds.mlHome} edge={mlHomeEdge} onOddsChange={(v) => setOdds({ ...odds, mlHome: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "Moneyline", betType: "ML", side: "home" }} bothSidesFilled={!!(odds.mlAway && odds.mlHome)} />
             </div>
@@ -844,42 +946,42 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
             )}
           </div>
 
-          <RunLineSection model={model} oddsKeyFav="rlFav" oddsKeyDog="rlDog" odds={odds} setOdds={setOdds} homeAbbr={matchup.home.abbr} awayAbbr={matchup.away.abbr} bankroll={bankroll} onLog={onAddToLog} logContext={logContext} line={1.5} />
+          <RunLineSection model={model} oddsKeyFav="rlFav" oddsKeyDog="rlDog" odds={odds} setOdds={setOdds} homeAbbr={matchup.home.abbr} awayAbbr={matchup.away.abbr} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, betType: "RL" }} line={1.5} />
 
           <div>
-            <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold mb-2">Total — modelo {model.projectedTotal.toFixed(1)}</p>
+            <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold mb-1">Total — modelo {model.projectedTotal.toFixed(1)}</p>
             <div className="flex items-center gap-2 mb-2">
               <span className="fs-10 text-white/40">Línea</span>
-              <input type="text" inputMode="decimal" value={odds.totalLine ?? ""} onChange={(e) => setOdds({ ...odds, totalLine: e.target.value })} placeholder="8.5" className="w-16 bg-input ring-1 ring-white/10 focus-ring-green rounded px-1.5 py-1 text-center font-mono text-xs text-brand placeholder:text-white/20" />
+              <input type="text" inputMode="decimal" value={odds.totalLine ?? ""} onChange={(e) => setOdds({ ...odds, totalLine: e.target.value })} placeholder="8.5" className="w-16 bg-input ring-1 ring-white/10 focus-ring-accent rounded-lg px-2 py-1 text-center font-mono text-sm text-brand placeholder:text-white/20" />
             </div>
-            <div className="space-y-1.5">
+            <div>
               <BetRow label="Over" prob={overProb ?? 0.5} oddsValue={odds.over} edge={overEdge} onOddsChange={(v) => setOdds({ ...odds, over: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total ${odds.totalLine || ""}`, betType: "Total", side: "over", line: odds.totalLine ? Number(odds.totalLine) : null }} bothSidesFilled={!!(odds.over && odds.under)} />
               <BetRow label="Under" prob={underProb ?? 0.5} oddsValue={odds.under} edge={underEdge} onOddsChange={(v) => setOdds({ ...odds, under: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total ${odds.totalLine || ""}`, betType: "Total", side: "under", line: odds.totalLine ? Number(odds.totalLine) : null }} bothSidesFilled={!!(odds.over && odds.under)} />
             </div>
           </div>
 
-          <div className="rounded-lg bg-white/[0.02] ring-1 ring-white/5">
-            <button onClick={() => setF5Open(!f5Open)} className="w-full flex items-center justify-between px-3 py-2.5">
+          <div className="rounded-xl bg-white/[0.015] ring-1 ring-white/5">
+            <button onClick={() => setF5Open(!f5Open)} className="w-full flex items-center justify-between px-4 py-3">
               <span className="font-display fs-11 font-bold tracking-wide text-white/60">F5 · PRIMERAS 5 ENTRADAS</span>
               {f5Open ? <ChevronUp size={14} className="text-white/40" /> : <ChevronDown size={14} className="text-white/40" />}
             </button>
             {f5Open && (
-              <div className="px-3 pb-3 space-y-4">
+              <div className="px-4 pb-4 space-y-4">
                 <div>
-                  <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold mb-2">Moneyline F5</p>
-                  <div className="space-y-1.5">
+                  <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold mb-1">Moneyline F5</p>
+                  <div>
                     <BetRow label={matchup.away.abbr} prob={model.f5.awayWinProb} oddsValue={odds.f5MlAway} edge={f5MlAwayEdge} onOddsChange={(v) => setOdds({ ...odds, f5MlAway: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "ML F5", betType: "ML", side: "away", isF5: true }} bothSidesFilled={!!(odds.f5MlAway && odds.f5MlHome)} />
                     <BetRow label={matchup.home.abbr} prob={model.f5.homeWinProb} oddsValue={odds.f5MlHome} edge={f5MlHomeEdge} onOddsChange={(v) => setOdds({ ...odds, f5MlHome: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "ML F5", betType: "ML", side: "home", isF5: true }} bothSidesFilled={!!(odds.f5MlAway && odds.f5MlHome)} />
                   </div>
                 </div>
-                <RunLineSection model={model.f5} oddsKeyFav="f5RlFav" oddsKeyDog="f5RlDog" invertedKey="f5RlInverted" odds={odds} setOdds={setOdds} homeAbbr={matchup.home.abbr} awayAbbr={matchup.away.abbr} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "RL F5" }} line={0.5} />
+                <RunLineSection model={model.f5} oddsKeyFav="f5RlFav" oddsKeyDog="f5RlDog" invertedKey="f5RlInverted" odds={odds} setOdds={setOdds} homeAbbr={matchup.home.abbr} awayAbbr={matchup.away.abbr} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: "RL F5", betType: "RL", isF5: true }} line={0.5} />
                 <div>
-                  <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold mb-2">Total F5 — modelo {model.f5.projectedTotal.toFixed(1)}</p>
+                  <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold mb-1">Total F5 — modelo {model.f5.projectedTotal.toFixed(1)}</p>
                   <div className="flex items-center gap-2 mb-2">
                     <span className="fs-10 text-white/40">Línea</span>
-                    <input type="text" inputMode="decimal" value={odds.f5TotalLine ?? ""} onChange={(e) => setOdds({ ...odds, f5TotalLine: e.target.value })} placeholder="4.5" className="w-16 bg-input ring-1 ring-white/10 focus-ring-green rounded px-1.5 py-1 text-center font-mono text-xs text-brand placeholder:text-white/20" />
+                    <input type="text" inputMode="decimal" value={odds.f5TotalLine ?? ""} onChange={(e) => setOdds({ ...odds, f5TotalLine: e.target.value })} placeholder="4.5" className="w-16 bg-input ring-1 ring-white/10 focus-ring-accent rounded-lg px-2 py-1 text-center font-mono text-sm text-brand placeholder:text-white/20" />
                   </div>
-                  <div className="space-y-1.5">
+                  <div>
                     <BetRow label="Over" prob={f5OverProb ?? 0.5} oddsValue={odds.f5Over} edge={f5OverEdge} onOddsChange={(v) => setOdds({ ...odds, f5Over: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total F5 ${odds.f5TotalLine || ""}`, betType: "Total", side: "over", line: odds.f5TotalLine ? Number(odds.f5TotalLine) : null, isF5: true }} bothSidesFilled={!!(odds.f5Over && odds.f5Under)} />
                     <BetRow label="Under" prob={f5UnderProb ?? 0.5} oddsValue={odds.f5Under} edge={f5UnderEdge} onOddsChange={(v) => setOdds({ ...odds, f5Under: v })} bankroll={bankroll} onLog={onAddToLog} logContext={{ ...logContext, market: `Total F5 ${odds.f5TotalLine || ""}`, betType: "Total", side: "under", line: odds.f5TotalLine ? Number(odds.f5TotalLine) : null, isF5: true }} bothSidesFilled={!!(odds.f5Over && odds.f5Under)} />
                   </div>
@@ -890,8 +992,8 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
 
           <PropsPanel value={matchup.propsText} onChange={(v) => setMatchup({ ...matchup, propsText: v })} autoProps={autoProps} onLog={onAddToLog} logContext={logContext} bankroll={bankroll} />
 
-          <p className="fs-9 text-white/25 leading-relaxed pt-2 border-top-white-04">
-            Modelo: Elo de equipo + abridor (ERA/WHIP/K9) + bullpen + splits + forma reciente + clima. Momios en decimal. RL asigna -1.5/+1.5 según el favorito del modelo — usa ⇄ si el mercado real lo tiene invertido. El tier (BET/LEAN/FADE) y el monto de Kelly solo aparecen cuando metes el momio de <strong>ambos</strong> lados del mercado. BET ≥6% edge, LEAN ≥2.5%, FADE &lt;-2.5%. Las apuestas de juego completo (ML/RL/Total) se cotejan solas con el resultado final; las de F5 se marcan a mano porque no hay score parcial confiable.
+          <p className="fs-9 text-white/25 leading-relaxed pt-2 border-t border-white/[0.06]">
+            Modelo: Elo + abridor + bullpen + splits + forma + clima. RL asigna -1.5/+1.5 según favorito del modelo — usa ⇄ si el mercado real difiere. BET ≥6%, LEAN ≥2.5%, FADE &lt;-2.5%. F5 se cotejan a mano.
           </p>
         </div>
       </div>
@@ -900,7 +1002,7 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
 }
 
 // ---------------------------------------------------------------------------
-// PICK OF DAY — vive en el sidebar, tarjeta destacada más grande
+// PICK OF DAY — "Apuesta Máxima", vive en el sidebar
 // ---------------------------------------------------------------------------
 function PickOfDay({ matchups, oddsMap, bankroll }) {
   const best = useMemo(() => {
@@ -939,7 +1041,7 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
         { label: `${f5DogAbbr} +0.5 F5`, prob: model.f5.dogPlus0_5, odd: odds.f5RlDog, matchup: matchupLabel, otherOdd: odds.f5RlFav },
       ];
       for (const c of candidates) {
-        if (!c.odd || !c.otherOdd || c.prob === null || c.prob === undefined) continue; // requiere ambos lados del mercado
+        if (!c.odd || !c.otherOdd || c.prob === null || c.prob === undefined) continue;
         const e = edgePct(c.prob, c.odd);
         if (e === null || Number.isNaN(e)) continue;
         if (!top || e > top.edge) top = { ...c, edge: e };
@@ -948,14 +1050,11 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
     return top;
   }, [matchups, oddsMap]);
 
-  // "Apuesta Máxima" solo se muestra cuando el mejor candidato alcanza tier BET (≥6%).
-  // Si el mejor edge disponible no llega a ese umbral, es honesto decir que hoy
-  // no hay una apuesta lo bastante fuerte, en vez de forzar una recomendación.
   const isMaxBet = best && edgeTier(best.edge)?.label === "BET";
 
   if (!best) {
     return (
-      <div className="rounded-xl bg-white-02 ring-1 ring-white/5 px-4 py-4 flex items-start gap-2.5">
+      <div className="rounded-2xl bg-white-02 ring-1 ring-white/5 px-4 py-4 flex items-start gap-2.5">
         <AlertCircle size={16} className="text-white/30 shrink-0 mt-0.5" />
         <p className="text-sm text-white/40 leading-relaxed">Ingresa momios en algún cruce para ver la apuesta máxima del día aquí.</p>
       </div>
@@ -963,15 +1062,15 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
   }
 
   return (
-    <div className="rounded-xl relative overflow-hidden ring-1 ring-amber-400/30 px-5 py-5 bg-amber-grad">
+    <div className="rounded-2xl relative overflow-hidden ring-1 ring-accent-glow px-5 py-5 bg-accent-grad">
       <div className="flex items-center gap-2 mb-3">
-        <Trophy size={15} className="text-amber-300" />
-        <span className="font-display fs-10 uppercase tracking-widest font-bold text-amber-300/90">Apuesta Máxima</span>
+        <Trophy size={15} className="text-accent" />
+        <span className="font-display fs-10 uppercase tracking-widest font-bold text-accent">Apuesta máxima</span>
       </div>
       <p className="font-display text-2xl font-bold text-brand leading-tight tracking-wide">{best.label}</p>
       <p className="text-sm text-white/40 mt-1">{best.matchup} · momio {Number(best.odd).toFixed(2)}</p>
       <div className="flex items-center gap-2.5 mt-3">
-        <span className="text-3xl font-mono font-bold text-amber-300">+{best.edge.toFixed(1)}%</span>
+        <span className="text-3xl font-mono font-bold text-accent">+{best.edge.toFixed(1)}%</span>
         <TierChip edge={best.edge} size="lg" />
       </div>
       {(() => {
@@ -982,30 +1081,35 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
         ) : null;
       })()}
       {!isMaxBet && (
-        <p className="fs-9 text-white/30 mt-3 leading-relaxed italic">Este es el mejor edge disponible hoy, pero no alcanza el umbral BET (≥6%) — trátalo como referencia, no como una apuesta "segura".</p>
+        <p className="fs-9 text-white/30 mt-3 leading-relaxed italic">Mejor edge disponible hoy, pero no alcanza el umbral BET (≥6%) — trátalo como referencia.</p>
       )}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// BET LOG PANEL — resumen compacto en sidebar + lista completa al expandir
+// BET LOG TAB — pestaña completa con buscador y filtros (antes vivía
+// comprimida en el sidebar; ahora tiene su propio espacio para navegar
+// fácil entre muchas apuestas).
 // ---------------------------------------------------------------------------
 function ResultButton({ active, color, onClick, children }) {
   return (
     <button
       onClick={onClick}
-      className="fs-9 font-bold uppercase tracking-wide px-2 py-1 rounded transition-all"
-      style={{ color: active ? "#0A0E12" : color, background: active ? color : `${color}1A`, boxShadow: active ? "none" : `0 0 0 1px ${color}4D inset` }}
+      className="fs-9 font-bold uppercase tracking-wide px-2.5 py-1.5 rounded-md transition-all"
+      style={{ color: active ? "#06070A" : color, background: active ? color : `${color}1A`, boxShadow: active ? "none" : `0 0 0 1px ${color}4D inset` }}
     >
       {children}
     </button>
   );
 }
 
-function BetLogPanel({ entries, setEntries }) {
-  const [open, setOpen] = useState(false);
+function BetLogTab({ entries, setEntries }) {
+  const [search, setSearch] = useState("");
+  const [resultFilter, setResultFilter] = useState("all");
+  const [marketFilter, setMarketFilter] = useState("all");
   const summary = useMemo(() => summarizeLog(entries), [entries]);
+
   const updateEntry = (id, patch) => setEntries((prev) => prev.map(e => e.id === id ? { ...e, ...patch } : e));
   const removeEntry = (id) => setEntries((prev) => prev.filter(e => e.id !== id));
 
@@ -1032,145 +1136,276 @@ function BetLogPanel({ entries, setEntries }) {
     e.target.value = "";
   };
 
-  return (
-    <div className="rounded-xl bg-card ring-1 ring-white-06 p-4">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <Trophy size={14} className="text-amber-300" />
-          <span className="font-display text-sm font-bold tracking-wide">Bitácora</span>
-        </div>
-        <span className="fs-9 text-white/30 font-mono">{summary.totalBets}</span>
-      </div>
-      <div className="grid grid-cols-2 gap-2 mb-3">
-        <div className="rounded-lg bg-white-02 px-2.5 py-2 text-center">
-          <p className="fs-9 text-white/35 uppercase">Balance</p>
-          <p className={`text-sm font-mono font-bold mt-0.5 ${summary.totalProfit > 0 ? "text-green" : summary.totalProfit < 0 ? "text-red" : "text-brand"}`}>{summary.totalProfit > 0 ? "+" : ""}${summary.totalProfit.toFixed(0)}</p>
-        </div>
-        <div className="rounded-lg bg-white-02 px-2.5 py-2 text-center">
-          <p className="fs-9 text-white/35 uppercase">ROI</p>
-          <p className={`text-sm font-mono font-bold mt-0.5 ${summary.roi > 0 ? "text-green" : summary.roi < 0 ? "text-red" : "text-brand"}`}>{summary.roi !== null ? `${summary.roi > 0 ? "+" : ""}${summary.roi.toFixed(1)}%` : "—"}</p>
-        </div>
-      </div>
-      <p className="fs-9 text-white/30 text-center mb-3">{summary.wins}G-{summary.losses}P · {summary.pending} pend.</p>
-      <button onClick={() => setOpen(!open)} className="w-full fs-10 font-bold uppercase text-white/50 bg-white-02 ring-1 ring-white/10 rounded-lg py-2">
-        {open ? "Ocultar detalle" : "Ver detalle"}
-      </button>
+  const marketTypes = useMemo(() => {
+    const types = new Set(entries.map(e => e.betType).filter(Boolean));
+    return Array.from(types);
+  }, [entries]);
 
-      {open && (
-        <div className="mt-3 space-y-2 max-h-96 overflow-y-auto pr-1">
-          {entries.length === 0 ? (
-            <p className="fs-10 text-white/30 leading-relaxed">Usa el botón <span className="text-green font-bold">+</span> junto a cualquier momio para registrar la apuesta.</p>
-          ) : (
-            [...entries].reverse().map((entry) => (
-              <div key={entry.id} className="rounded-lg bg-white-02 px-2.5 py-2">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="text-xs font-bold text-brand truncate">{entry.label} {entry.autoGraded && <CheckCircle2 size={10} className="inline text-green ml-1" />}</p>
-                    <p className="fs-9 text-white/40 truncate">{entry.matchup} · {entry.market} · {Number(entry.odds).toFixed(2)}</p>
-                    <p className="fs-9 text-white/30">${Number(entry.stake).toFixed(0)} · {entry.date}</p>
-                  </div>
-                  <button onClick={() => removeEntry(entry.id)} className="text-white/25 fs-10 shrink-0">✕</button>
+  const filtered = useMemo(() => {
+    return [...entries].reverse().filter(e => {
+      if (resultFilter !== "all" && (e.result || "pending") !== resultFilter) return false;
+      if (marketFilter !== "all" && e.betType !== marketFilter) return false;
+      if (search.trim()) {
+        const q = search.toLowerCase();
+        const haystack = `${e.label} ${e.matchup} ${e.market}`.toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [entries, search, resultFilter, marketFilter]);
+
+  return (
+    <div className="space-y-5">
+      <div className="grid grid-cols-4 gap-3">
+        <div className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 text-center">
+          <p className="fs-9 text-white/35 uppercase tracking-wide">Apostado</p>
+          <p className="text-lg font-mono font-bold text-brand mt-1">${summary.totalStaked.toFixed(0)}</p>
+        </div>
+        <div className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 text-center">
+          <p className="fs-9 text-white/35 uppercase tracking-wide">Balance</p>
+          <p className="text-lg font-mono font-bold mt-1" style={{ color: summary.totalProfit > 0 ? "#00FFB2" : summary.totalProfit < 0 ? "#FF3D71" : "#E4E7EC" }}>{summary.totalProfit > 0 ? "+" : ""}${summary.totalProfit.toFixed(0)}</p>
+        </div>
+        <div className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 text-center">
+          <p className="fs-9 text-white/35 uppercase tracking-wide">ROI</p>
+          <p className="text-lg font-mono font-bold mt-1" style={{ color: summary.roi > 0 ? "#00FFB2" : summary.roi < 0 ? "#FF3D71" : "#E4E7EC" }}>{summary.roi !== null ? `${summary.roi > 0 ? "+" : ""}${summary.roi.toFixed(1)}%` : "—"}</p>
+        </div>
+        <div className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 text-center">
+          <p className="fs-9 text-white/35 uppercase tracking-wide">Win rate</p>
+          <p className="text-lg font-mono font-bold text-brand mt-1">{summary.winRate !== null ? `${summary.winRate.toFixed(0)}%` : "—"}</p>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2.5 flex-wrap">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Buscar equipo o mercado..."
+            className="w-full bg-card ring-1 ring-white-06 focus-ring-accent rounded-lg pl-9 pr-3 py-2.5 text-sm text-brand placeholder:text-white/25"
+          />
+        </div>
+        <select value={resultFilter} onChange={(e) => setResultFilter(e.target.value)} className="bg-card ring-1 ring-white-06 rounded-lg px-3 py-2.5 text-sm text-brand">
+          <option value="all">Resultado: todos</option>
+          <option value="pending">Pendiente</option>
+          <option value="won">Ganada</option>
+          <option value="lost">Perdida</option>
+          <option value="push">Push</option>
+        </select>
+        <select value={marketFilter} onChange={(e) => setMarketFilter(e.target.value)} className="bg-card ring-1 ring-white-06 rounded-lg px-3 py-2.5 text-sm text-brand">
+          <option value="all">Mercado: todos</option>
+          {marketTypes.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="rounded-xl bg-card ring-1 ring-white-06 px-5 py-8 text-center">
+          <p className="text-sm text-white/35">{entries.length === 0 ? "Sin apuestas registradas todavía. Usa el botón + junto a cualquier momio." : "Ninguna apuesta coincide con esos filtros."}</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map((entry) => (
+            <div key={entry.id} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-brand truncate flex items-center gap-1.5">{entry.label} {entry.autoGraded && <CheckCircle2 size={12} className="text-accent" />}</p>
+                  <p className="fs-10 text-white/40 truncate mt-0.5">{entry.matchup} · {entry.market} · {Number(entry.odds).toFixed(2)}</p>
+                  <p className="fs-9 text-white/30 mt-0.5">${Number(entry.stake).toFixed(0)} · {entry.date}</p>
                 </div>
-                <div className="flex items-center gap-1 mt-1.5">
-                  <ResultButton active={!entry.result || entry.result === "pending"} color="#9CA3AF" onClick={() => updateEntry(entry.id, { result: "pending" })}>Pend</ResultButton>
-                  <ResultButton active={entry.result === "won"} color="#39FF7A" onClick={() => updateEntry(entry.id, { result: "won" })}>Ganada</ResultButton>
-                  <ResultButton active={entry.result === "lost"} color="#FF4655" onClick={() => updateEntry(entry.id, { result: "lost" })}>Perdida</ResultButton>
-                  <ResultButton active={entry.result === "push"} color="#FFB319" onClick={() => updateEntry(entry.id, { result: "push" })}>Push</ResultButton>
-                  {(entry.result === "won" || entry.result === "lost") && (
-                    <span className={`fs-9 font-mono font-bold ml-auto ${profitForEntry(entry) >= 0 ? "text-green" : "text-red"}`}>{profitForEntry(entry) >= 0 ? "+" : ""}${profitForEntry(entry).toFixed(0)}</span>
-                  )}
-                </div>
+                <button onClick={() => removeEntry(entry.id)} className="text-white/25 fs-11 shrink-0">✕</button>
               </div>
-            ))
-          )}
-          <div className="flex items-center gap-2 pt-1">
-            <button onClick={exportLog} className="flex-1 fs-9 font-bold uppercase text-white/50 bg-white-02 ring-1 ring-white/10 rounded-lg py-1.5">Exportar</button>
-            <label className="flex-1 fs-9 font-bold uppercase text-white/50 bg-white-02 ring-1 ring-white/10 rounded-lg py-1.5 text-center cursor-pointer">
-              Importar
-              <input type="file" accept="application/json" onChange={importLog} className="hidden" />
-            </label>
-          </div>
+              <div className="flex items-center gap-1.5 mt-2.5">
+                <ResultButton active={!entry.result || entry.result === "pending"} color="#9CA3AF" onClick={() => updateEntry(entry.id, { result: "pending" })}>Pend</ResultButton>
+                <ResultButton active={entry.result === "won"} color="#00FFB2" onClick={() => updateEntry(entry.id, { result: "won" })}>Ganada</ResultButton>
+                <ResultButton active={entry.result === "lost"} color="#FF3D71" onClick={() => updateEntry(entry.id, { result: "lost" })}>Perdida</ResultButton>
+                <ResultButton active={entry.result === "push"} color="#FFB200" onClick={() => updateEntry(entry.id, { result: "push" })}>Push</ResultButton>
+                {(entry.result === "won" || entry.result === "lost") && (
+                  <span className="fs-10 font-mono font-bold ml-auto" style={{ color: profitForEntry(entry) >= 0 ? "#00FFB2" : "#FF3D71" }}>{profitForEntry(entry) >= 0 ? "+" : ""}${profitForEntry(entry).toFixed(0)}</span>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       )}
+
+      <div className="flex items-center gap-2">
+        <button onClick={exportLog} className="flex-1 fs-10 font-bold uppercase text-white/50 bg-card ring-1 ring-white-06 rounded-lg py-2.5">Exportar</button>
+        <label className="flex-1 fs-10 font-bold uppercase text-white/50 bg-card ring-1 ring-white-06 rounded-lg py-2.5 text-center cursor-pointer">
+          Importar
+          <input type="file" accept="application/json" onChange={importLog} className="hidden" />
+        </label>
+      </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// REPORTS PANEL — vista diaria/semanal/mensual de la bitácora
+// REPORTS TAB
 // ---------------------------------------------------------------------------
-function ReportsPanel({ entries }) {
-  const [open, setOpen] = useState(false);
+function ReportsTab({ entries }) {
   const [period, setPeriod] = useState("day");
   const report = useMemo(() => buildReport(entries, period), [entries, period]);
 
   const formatKey = (key) => {
     if (period === "day") {
       const d = new Date(key + "T12:00:00");
-      return d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+      return d.toLocaleDateString([], { weekday: "long", day: "numeric", month: "short" });
     }
     if (period === "week") {
       const d = new Date(key + "T12:00:00");
       return `Semana del ${d.toLocaleDateString([], { day: "numeric", month: "short" })}`;
     }
-    const [y, m] = key.split("-");
     return new Date(`${key}-01T12:00:00`).toLocaleDateString([], { month: "long", year: "numeric" });
   };
 
+  const settledWithoutDate = entries.filter(e => (e.result === "won" || e.result === "lost" || e.result === "push") && !e.dateISO).length;
+
   return (
-    <div className="rounded-xl bg-card ring-1 ring-white-06 p-4">
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between">
-        <span className="font-display text-sm font-bold tracking-wide">Reportes</span>
-        {open ? <ChevronUp size={14} className="text-white/40" /> : <ChevronDown size={14} className="text-white/40" />}
-      </button>
+    <div className="space-y-5">
+      <div className="flex gap-2">
+        {[{ k: "day", l: "Diario" }, { k: "week", l: "Semanal" }, { k: "month", l: "Mensual" }].map(p => (
+          <button
+            key={p.k}
+            onClick={() => setPeriod(p.k)}
+            className="flex-1 fs-10 font-bold uppercase tracking-wide py-2.5 rounded-lg transition-all"
+            style={period === p.k
+              ? { color: "#00FFB2", background: "rgba(0,255,178,0.1)", boxShadow: "0 0 0 1px rgba(0,255,178,0.3) inset" }
+              : { color: "rgba(255,255,255,0.4)", background: "rgba(255,255,255,0.03)", boxShadow: "0 0 0 1px rgba(255,255,255,0.08) inset" }}
+          >
+            {p.l}
+          </button>
+        ))}
+      </div>
 
-      {open && (
-        <div className="mt-3 space-y-3">
-          <div className="flex gap-1.5">
-            {[{ k: "day", l: "Diario" }, { k: "week", l: "Semanal" }, { k: "month", l: "Mensual" }].map(p => (
-              <button
-                key={p.k}
-                onClick={() => setPeriod(p.k)}
-                className={`flex-1 fs-9 font-bold uppercase tracking-wide py-1.5 rounded-lg transition-all ${period === p.k ? "text-green bg-green-chip-10 ring-1 ring-green-30" : "text-white/40 bg-white-02 ring-1 ring-white/10"}`}
-              >
-                {p.l}
-              </button>
-            ))}
-          </div>
-
-          {report.length === 0 ? (
-            (() => {
-              const settledWithoutDate = entries.filter(e => (e.result === "won" || e.result === "lost" || e.result === "push") && !e.dateISO).length;
-              return settledWithoutDate > 0 ? (
-                <p className="fs-10 text-white/30 leading-relaxed">Tienes {settledWithoutDate} apuesta(s) liquidada(s) registradas antes de que existiera el cotejo por fecha — cuentan en el Balance/ROI general de la Bitácora, pero no aparecen aquí. Las que registres de ahora en adelante sí van a aparecer.</p>
-              ) : (
-                <p className="fs-10 text-white/30 leading-relaxed">Sin apuestas liquidadas (Ganada/Perdida/Push) todavía para generar un reporte.</p>
-              );
-            })()
+      {report.length === 0 ? (
+        <div className="rounded-xl bg-card ring-1 ring-white-06 px-5 py-8 text-center">
+          {settledWithoutDate > 0 ? (
+            <p className="text-sm text-white/35 leading-relaxed">Tienes {settledWithoutDate} apuesta(s) liquidada(s) registradas antes de que existiera el cotejo por fecha — cuentan en el Balance/ROI de la Bitácora, pero no aparecen aquí. Las que registres de ahora en adelante sí aparecen.</p>
           ) : (
-            <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
-              {report.map((r) => (
-                <div key={r.key} className="rounded-lg bg-white-02 px-2.5 py-2">
-                  <div className="flex items-center justify-between">
-                    <p className="fs-10 font-bold text-brand">{formatKey(r.key)}</p>
-                    <span className={`fs-10 font-mono font-bold ${r.profit > 0 ? "text-green" : r.profit < 0 ? "text-red" : "text-white/30"}`}>
-                      {r.profit > 0 ? "+" : ""}${r.profit.toFixed(0)}
-                    </span>
-                  </div>
-                  <p className="fs-9 text-white/35 mt-0.5">
-                    {r.count} apuesta(s) · {r.wins}G-{r.losses}P · ROI {r.roi !== null ? `${r.roi > 0 ? "+" : ""}${r.roi.toFixed(1)}%` : "—"}
-                  </p>
-                </div>
-              ))}
-            </div>
+            <p className="text-sm text-white/35">Sin apuestas liquidadas todavía para generar un reporte.</p>
           )}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {report.map((r) => (
+            <div key={r.key} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3.5">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-bold text-brand">{formatKey(r.key)}</p>
+                <span className="font-mono text-base font-bold" style={{ color: r.profit > 0 ? "#00FFB2" : r.profit < 0 ? "#FF3D71" : "rgba(255,255,255,0.3)" }}>
+                  {r.profit > 0 ? "+" : ""}${r.profit.toFixed(0)}
+                </span>
+              </div>
+              <p className="fs-10 text-white/35 mt-1">
+                {r.count} apuesta(s) · {r.wins}G-{r.losses}P · ROI {r.roi !== null ? `${r.roi > 0 ? "+" : ""}${r.roi.toFixed(1)}%` : "—"}
+              </p>
+            </div>
+          ))}
         </div>
       )}
     </div>
   );
 }
 
+// ---------------------------------------------------------------------------
+// MODEL HEALTH TAB — métricas reales de desempeño, sin autoajuste. El
+// usuario decide qué hacer con la información; la app solo la presenta clara.
+// ---------------------------------------------------------------------------
+function SampleBadge({ sufficient }) {
+  return sufficient ? null : (
+    <span className="fs-9 font-bold uppercase text-amber-300 bg-amber-400/10 px-2 py-0.5 rounded-md ml-2">muestra baja</span>
+  );
+}
 
+function ModelHealthTab({ entries }) {
+  const health = useMemo(() => analyzeModelHealth(entries), [entries]);
+
+  if (health.totalSettled === 0) {
+    return (
+      <div className="rounded-xl bg-card ring-1 ring-white-06 px-5 py-10 text-center">
+        <Activity size={28} className="text-white/20 mx-auto mb-3" />
+        <p className="text-sm text-white/40 leading-relaxed max-w-sm mx-auto">Sin apuestas Ganadas/Perdidas todavía. En cuanto cotejes resultados (automático o a mano), aquí vas a ver qué tan bien le está pegando el modelo.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {!health.overallSufficient && (
+        <div className="rounded-xl bg-amber-400/10 ring-1 ring-amber-400/30 px-4 py-3 flex items-start gap-2.5">
+          <AlertCircle size={15} className="text-amber-300 mt-0.5 shrink-0" />
+          <p className="text-sm text-white/60 leading-relaxed">Solo {health.totalSettled} apuesta(s) liquidada(s). Por debajo de {MIN_SAMPLE_SIZE} muestras, cualquier patrón aquí puede ser suerte, no señal real — trata estos números como referencia, no como conclusión.</p>
+        </div>
+      )}
+
+      <div>
+        <h3 className="font-display text-sm font-bold tracking-wide text-white/60 uppercase mb-3">Win rate por mercado</h3>
+        <div className="space-y-2">
+          {health.byMarket.map((m) => (
+            <div key={m.key} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center">
+                <span className="text-sm font-bold text-brand">{m.key}</span>
+                <SampleBadge sufficient={m.sufficient} />
+              </div>
+              <div className="text-right">
+                <span className="font-mono text-base font-bold" style={{ color: m.winRate >= 50 ? "#00FFB2" : "#FF3D71" }}>{m.winRate.toFixed(0)}%</span>
+                <span className="fs-9 text-white/30 ml-2">{m.wins}G-{m.losses}P</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <h3 className="font-display text-sm font-bold tracking-wide text-white/60 uppercase mb-3">Win rate por tier de edge</h3>
+        <div className="space-y-2">
+          {health.byTier.map((t) => (
+            <div key={t.key} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center">
+                <TierChip edge={t.key === "BET" ? 10 : t.key === "LEAN" ? 4 : t.key === "FADE" ? -10 : 0} />
+                <SampleBadge sufficient={t.sufficient} />
+              </div>
+              <div className="text-right">
+                <span className="font-mono text-base font-bold" style={{ color: t.winRate >= 50 ? "#00FFB2" : "#FF3D71" }}>{t.winRate.toFixed(0)}%</span>
+                <span className="fs-9 text-white/30 ml-2">{t.wins}G-{t.losses}P</span>
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="fs-9 text-white/30 mt-2 leading-relaxed">Si BET no le pega claramente mejor que LEAN o PASS, el umbral de tier podría necesitar ajuste — pero espera a tener muestra suficiente antes de decidir.</p>
+      </div>
+
+      <div>
+        <h3 className="font-display text-sm font-bold tracking-wide text-white/60 uppercase mb-3">Calibración del modelo</h3>
+        <div className="space-y-2">
+          {health.calibration.map((c) => {
+            const bandCenter = c.label === "50-60%" ? 55 : c.label === "60-70%" ? 65 : 75;
+            const diff = c.winRate !== null ? c.winRate - bandCenter : null;
+            return (
+              <div key={c.label} className="rounded-xl bg-card ring-1 ring-white-06 px-4 py-3 flex items-center justify-between">
+                <div className="flex items-center">
+                  <span className="text-sm font-bold text-brand">Modelo dice {c.label}</span>
+                  <SampleBadge sufficient={c.sufficient} />
+                </div>
+                <div className="text-right">
+                  <span className="font-mono text-base font-bold text-brand">{c.winRate?.toFixed(0)}% real</span>
+                  {diff !== null && (
+                    <span className="fs-9 ml-2" style={{ color: Math.abs(diff) <= 8 ? "#00FFB2" : "#FF3D71" }}>
+                      {diff > 0 ? "+" : ""}{diff.toFixed(0)}pp vs banda
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <p className="fs-9 text-white/30 mt-2 leading-relaxed">Si el modelo dice "65%" y en la realidad gana mucho menos (ej. 45%), está sobreconfiado en esa banda. Si gana mucho más, está siendo tímido.</p>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// MAIN APP
 // ---------------------------------------------------------------------------
 let nextId = 1;
 function emptyMatchup() {
@@ -1178,6 +1413,7 @@ function emptyMatchup() {
 }
 
 export default function MLBEdge() {
+  const [activeTab, setActiveTab] = useState("games");
   const [matchups, setMatchups] = useState([emptyMatchup()]);
   const [openId, setOpenId] = useState(null);
   const [oddsMap, setOddsMap] = useState({});
@@ -1206,7 +1442,6 @@ export default function MLBEdge() {
   const [availableDates, setAvailableDates] = useState([]);
   const [selectedDate, setSelectedDate] = useState(null);
   const [calendarLoadedId, setCalendarLoadedId] = useState(null);
-  const [autoGradedCount, setAutoGradedCount] = useState(0);
 
   const loadPipeline = useCallback(async () => {
     if (!DATA_JSON_URL) { setPipelineStatus("no-url"); return; }
@@ -1225,18 +1460,9 @@ export default function MLBEdge() {
       setPipelineMeta({ generatedAt: payload.generatedAt, date: payload.date });
       setPipelineStatus("ok");
 
-      // Cotejo automático: si el pipeline trae resultados finales de ayer,
-      // los usamos para marcar Ganada/Perdida/Push en la bitácora sola.
-      const resultsByGamePk = Object.fromEntries(
-        (payload.results ?? []).map(r => [r.gamePk, r])
-      );
+      const resultsByGamePk = Object.fromEntries((payload.results ?? []).map(r => [r.gamePk, r]));
       if (Object.keys(resultsByGamePk).length) {
-        setBetLog((prev) => {
-          const graded = autoGradeLog(prev, resultsByGamePk);
-          const newlyGraded = graded.filter((g, i) => g.autoGraded && prev[i]?.result !== g.result).length;
-          if (newlyGraded > 0) setAutoGradedCount(newlyGraded);
-          return graded;
-        });
+        setBetLog((prev) => autoGradeLog(prev, resultsByGamePk));
       }
     } catch (e) {
       console.error(e);
@@ -1248,47 +1474,31 @@ export default function MLBEdge() {
 
   useEffect(() => { loadPipeline(); }, [loadPipeline]);
 
-  const gamesForSelectedDate = useMemo(
-    () => autoGames.filter(g => g.dateStr === selectedDate),
-    [autoGames, selectedDate]
-  );
-
   const loadCalendarForDate = (dateStr) => {
     const games = autoGames.filter(g => g.dateStr === dateStr);
     if (!games.length) return;
     const newMatchups = [];
     const newOddsMap = {};
-
     for (const g of games) {
       const m = {
         ...emptyMatchup(),
-        home: g.home,
-        away: g.away,
-        timeLabel: g.timeLabel,
-        homeStarter: g.homeStarter,
-        awayStarter: g.awayStarter,
-        weather: g.weather,
+        home: g.home, away: g.away, timeLabel: g.timeLabel,
+        homeStarter: g.homeStarter, awayStarter: g.awayStarter, weather: g.weather,
         gamePk: g.gamePk,
       };
       newMatchups.push(m);
-
       const ao = g.autoOdds;
       if (ao) {
         const model = buildModel(m);
         const homeIsFav = model.homeIsFavorite;
         newOddsMap[m.id] = {
-          mlHome: ao.mlHome ?? "",
-          mlAway: ao.mlAway ?? "",
-          over: ao.totalOverPrice ?? "",
-          under: ao.totalUnderPrice ?? "",
-          totalLine: ao.totalPoint ?? "",
+          mlHome: ao.mlHome ?? "", mlAway: ao.mlAway ?? "",
+          over: ao.totalOverPrice ?? "", under: ao.totalUnderPrice ?? "", totalLine: ao.totalPoint ?? "",
           rlFav: homeIsFav ? (ao.rlHomePrice ?? "") : (ao.rlAwayPrice ?? ""),
           rlDog: homeIsFav ? (ao.rlAwayPrice ?? "") : (ao.rlHomePrice ?? ""),
-          autoOddsLoaded: true,
         };
       }
     }
-
     setMatchups(newMatchups);
     setOddsMap(newOddsMap);
     setCalendarLoadedId(dateStr);
@@ -1298,149 +1508,174 @@ export default function MLBEdge() {
   const setOddsForMatchup = (id, odds) => setOddsMap((prev) => ({ ...prev, [id]: odds }));
   const addMatchup = () => setMatchups((prev) => [...prev, emptyMatchup()]);
   const removeMatchup = (id) => setMatchups((prev) => prev.filter(m => m.id !== id));
-
   const openMatchup = matchups.find(m => m.id === openId);
 
+  const TABS = [
+    { k: "games", l: "Partidos", icon: LayoutGrid },
+    { k: "log", l: "Bitácora", icon: ListChecks },
+    { k: "reports", l: "Reportes", icon: Trophy },
+    { k: "health", l: "Salud del modelo", icon: Activity },
+  ];
+
   return (
-    <div className="mlb-edge-root" style={{ minHeight: "100vh", background: "#0A0E12", color: "#F2F2F0", fontFamily: "'Inter', sans-serif" }}>
+    <div className="mlb-edge-root" style={{ minHeight: "100vh", background: "#06070A", color: "#E4E7EC", fontFamily: "'Space Grotesk', sans-serif" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Big+Shoulders:wght@700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Big+Shoulders:wght@700;800;900&family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@500;700&display=swap');
         .font-display { font-family: 'Big Shoulders', sans-serif; text-transform: uppercase; }
-        select option { background: #10141A; }
+        select option { background: #0D0F14; }
         .mlb-edge-root, .mlb-edge-root * { box-sizing: border-box; }
-        .bg-app { background: #0A0E12; }
-        .bg-card { background: #15191F; }
-        .bg-input { background: #0F1318; }
-        .bg-header { background: rgba(10,14,18,0.97); backdrop-filter: blur(8px); }
-        .bg-green-chip-10 { background: rgba(57,255,122,0.10); }
-        .bg-red-chip-10 { background: rgba(255,70,85,0.10); }
-        .bg-amber-grad { background: linear-gradient(135deg, #1A1409, #0F0D08); }
+        .bg-app { background: #06070A; }
+        .bg-card { background: #0D0F14; }
+        .bg-input { background: #06070A; }
+        .bg-header { background: rgba(6,7,10,0.97); backdrop-filter: blur(10px); }
+        .bg-accent-chip { background: rgba(0,255,178,0.10); }
+        .bg-accent-grad { background: linear-gradient(135deg, rgba(0,255,178,0.10), rgba(0,217,255,0.03)); }
         .bg-white-02 { background: rgba(255,255,255,0.03); }
-        .bg-meter-track { background: #20252C; }
-        .text-brand { color: #F2F2F0; }
-        .text-green { color: #39FF7A; }
-        .text-red { color: #FF4655; }
-        .ring-white-06 { box-shadow: 0 0 0 1px rgba(255,255,255,0.08) inset; }
-        .ring-green-30 { box-shadow: 0 0 0 1px rgba(57,255,122,0.3) inset; }
-        .ring-red-30 { box-shadow: 0 0 0 1px rgba(255,70,85,0.3) inset; }
-        .focus-ring-green:focus { box-shadow: 0 0 0 2px rgba(57,255,122,0.6) inset; outline: none; }
-        .border-white-04 { border-bottom: 1px solid rgba(255,255,255,0.06); }
-        .border-top-white-04 { border-top: 1px solid rgba(255,255,255,0.06); }
+        .bg-meter-track { background: #181C24; }
+        .text-brand { color: #E4E7EC; }
+        .text-accent { color: #00FFB2; }
+        .ring-white-06 { box-shadow: 0 0 0 1px rgba(255,255,255,0.07) inset; }
+        .ring-accent-30 { box-shadow: 0 0 0 1px rgba(0,255,178,0.3) inset; }
+        .ring-accent-glow { box-shadow: 0 0 0 1px rgba(0,255,178,0.3) inset, 0 0 24px rgba(0,255,178,0.08); }
+        .focus-ring-accent:focus { box-shadow: 0 0 0 2px rgba(0,255,178,0.5) inset; outline: none; }
         .fs-9 { font-size: 10px; }
         .fs-10 { font-size: 11px; }
         .fs-11 { font-size: 12px; }
-        .sidebar-col { width: 320px; }
+        .sidebar-col { width: 300px; }
+        .glow-orb { position: absolute; border-radius: 50%; pointer-events: none; filter: blur(2px); }
         @media (max-width: 900px) {
           .layout-grid { grid-template-columns: 1fr !important; }
           .sidebar-col { width: 100% !important; }
         }
       `}</style>
 
-      <div className="bg-header" style={{ position: "sticky", top: 0, zIndex: 10, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+      <div className="glow-orb" style={{ top: -100, right: -80, width: 320, height: 320, background: "radial-gradient(circle, rgba(0,255,178,0.08), transparent 70%)" }} />
+      <div className="glow-orb" style={{ top: 300, left: -120, width: 280, height: 280, background: "radial-gradient(circle, rgba(255,46,151,0.05), transparent 70%)" }} />
+
+      <div className="bg-header" style={{ position: "sticky", top: 0, zIndex: 20, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
         <div className="px-6 py-4 flex items-center justify-between">
           <div>
-            <h1 className="font-display text-3xl font-bold tracking-wide leading-none">MLB <span className="text-green">EDGE</span></h1>
-            <p className="fs-10 text-white/35 mt-1 tracking-wide">TEMPORADA 2026 · PIPELINE AUTÓNOMO{autoGames.length > 0 ? ` · ${autoGames.length} JUEGOS CARGADOS` : ""}</p>
+            <h1 className="font-display text-3xl font-bold tracking-wide leading-none">MLB <span className="text-accent" style={{ textShadow: "0 0 20px rgba(0,255,178,0.4)" }}>EDGE</span></h1>
+            <p className="fs-9 text-white/35 mt-1 tracking-wide">TEMPORADA 2026 · PIPELINE AUTÓNOMO{autoGames.length > 0 ? ` · ${autoGames.length} JUEGOS` : ""}</p>
           </div>
           <div className="flex items-center gap-2.5">
             {pipelineStatus === "ok" && (
-              <span className="fs-9 font-bold uppercase text-green bg-green-chip-10 ring-1 ring-green-30 px-3 py-1.5 rounded-full">● Pipeline activo</span>
+              <span className="fs-9 font-bold uppercase text-accent bg-accent-chip ring-1 ring-accent-30 px-3 py-1.5 rounded-full flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-accent" style={{ boxShadow: "0 0 6px #00FFB2" }} /> Live
+              </span>
             )}
             <button onClick={loadPipeline} className="p-2 rounded-full bg-white/[0.05] ring-1 ring-white/10 active:scale-90 transition-transform">
-              <RefreshCw size={15} className={pipelineStatus === "loading" ? "animate-spin text-green" : "text-white/50"} />
+              <RefreshCw size={15} className={pipelineStatus === "loading" ? "animate-spin text-accent" : "text-white/50"} />
             </button>
           </div>
+        </div>
+        <div className="px-6 flex gap-1">
+          {TABS.map(t => {
+            const Icon = t.icon;
+            const active = activeTab === t.k;
+            return (
+              <button
+                key={t.k}
+                onClick={() => setActiveTab(t.k)}
+                className="font-display fs-10 font-bold tracking-wide px-4 py-3 rounded-t-lg transition-all flex items-center gap-1.5"
+                style={active ? { color: "#06070A", background: "#00FFB2" } : { color: "rgba(255,255,255,0.4)" }}
+              >
+                <Icon size={13} /> {t.l}
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      {pipelineStatus === "no-url" && (
-        <div className="px-6 pt-4">
-          <div className="rounded-xl bg-white-02 ring-1 ring-white/5 px-4 py-3 flex items-start gap-2.5">
-            <Info size={15} className="text-white/30 mt-0.5 shrink-0" />
-            <p className="text-sm text-white/35 leading-relaxed">Pipeline no configurado — edita <code className="text-white/50">DATA_JSON_URL</code>. Selección manual disponible abajo.</p>
-          </div>
-        </div>
-      )}
-      {pipelineStatus === "error" && (
-        <div className="px-6 pt-4">
-          <div className="rounded-xl bg-red-chip-10 ring-1 ring-red-30 px-4 py-3 flex items-start gap-2.5">
-            <AlertCircle size={15} className="text-red mt-0.5 shrink-0" />
-            <p className="text-sm text-white/50 leading-relaxed">No se pudo leer el pipeline. Usando respaldo.<br/><span className="text-red font-mono fs-9">Detalle: {pipelineErrorMsg}</span></p>
-          </div>
-        </div>
-      )}
-      {pipelineStatus === "ok" && availableDates.length > 0 && (
-        <div className="px-6 pt-4 flex items-center gap-3 flex-wrap">
-          <div className="flex gap-2">
-            {availableDates.map((d, i) => {
-              const dt = new Date(d + "T12:00:00");
-              const label = i === 0 ? "Hoy" : i === 1 ? "Mañana" : dt.toLocaleDateString([], { weekday: "short", day: "numeric" });
-              const count = autoGames.filter(g => g.dateStr === d).length;
-              const active = selectedDate === d;
-              return (
-                <button
-                  key={d}
-                  onClick={() => setSelectedDate(d)}
-                  className={`font-display fs-10 font-bold px-3.5 py-2 rounded-full transition-all ${active ? "text-green bg-green-chip-10 ring-1 ring-green-30" : "text-white/40 bg-white-02 ring-1 ring-white/10"}`}
-                >
-                  {label} · {count}
-                </button>
-              );
-            })}
-          </div>
-          {gamesForSelectedDate.length > 0 && calendarLoadedId !== selectedDate && (
-            <button onClick={() => loadCalendarForDate(selectedDate)} className="font-display fs-10 font-bold text-amber-300 bg-amber-400/10 ring-1 ring-amber-400/30 px-4 py-2 rounded-full">
-              Cargar estos {gamesForSelectedDate.length} juegos
-            </button>
-          )}
-        </div>
-      )}
-
-      <div className="px-6 py-5 layout-grid" style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: "24px", alignItems: "start" }}>
-        <div className="sidebar-col space-y-4" style={{ position: "sticky", top: "88px" }}>
-          <div className="rounded-xl bg-card ring-1 ring-white-06 p-4">
-            <div className="flex items-center justify-between">
-              <span className="fs-10 uppercase tracking-wider text-white/40 font-semibold">Bankroll</span>
-              <div className="flex items-center gap-1">
-                <span className="text-sm font-mono text-white/40">$</span>
-                <input type="text" inputMode="numeric" value={bankroll} onChange={(e) => setBankroll(e.target.value.replace(/[^0-9]/g, ""))} className="w-20 bg-input ring-1 ring-white/10 focus-ring-green rounded px-2 py-1 text-right font-mono text-sm text-brand" />
+      {activeTab === "games" && (
+        <>
+          {pipelineStatus === "no-url" && (
+            <div className="px-6 pt-4">
+              <div className="rounded-xl bg-white-02 ring-1 ring-white/5 px-4 py-3 flex items-start gap-2.5">
+                <Info size={15} className="text-white/30 mt-0.5 shrink-0" />
+                <p className="text-sm text-white/35 leading-relaxed">Pipeline no configurado — edita <code className="text-white/50">DATA_JSON_URL</code>.</p>
               </div>
             </div>
-          </div>
+          )}
+          {pipelineStatus === "error" && (
+            <div className="px-6 pt-4">
+              <div className="rounded-xl bg-red-500/10 ring-1 ring-red-500/30 px-4 py-3 flex items-start gap-2.5">
+                <AlertCircle size={15} className="text-red-400 mt-0.5 shrink-0" />
+                <p className="text-sm text-white/50 leading-relaxed">No se pudo leer el pipeline.<br/><span className="text-red-400 font-mono fs-9">Detalle: {pipelineErrorMsg}</span></p>
+              </div>
+            </div>
+          )}
+          {pipelineStatus === "ok" && availableDates.length > 0 && (
+            <div className="px-6 pt-4 flex items-center gap-3 flex-wrap">
+              <div className="flex gap-2">
+                {availableDates.map((d, i) => {
+                  const dt = new Date(d + "T12:00:00");
+                  const label = i === 0 ? "Hoy" : i === 1 ? "Mañana" : dt.toLocaleDateString([], { weekday: "short", day: "numeric" });
+                  const count = autoGames.filter(g => g.dateStr === d).length;
+                  const active = selectedDate === d;
+                  return (
+                    <button
+                      key={d}
+                      onClick={() => setSelectedDate(d)}
+                      className="font-display fs-10 font-bold px-3.5 py-2 rounded-full transition-all"
+                      style={active ? { color: "#00FFB2", background: "rgba(0,255,178,0.1)", boxShadow: "0 0 0 1px rgba(0,255,178,0.3) inset" } : { color: "rgba(255,255,255,0.4)", background: "rgba(255,255,255,0.03)", boxShadow: "0 0 0 1px rgba(255,255,255,0.08) inset" }}
+                    >
+                      {label} · {count}
+                    </button>
+                  );
+                })}
+              </div>
+              {autoGames.filter(g => g.dateStr === selectedDate).length > 0 && calendarLoadedId !== selectedDate && (
+                <button onClick={() => loadCalendarForDate(selectedDate)} className="font-display fs-10 font-bold text-amber-300 bg-amber-400/10 ring-1 ring-amber-400/30 px-4 py-2 rounded-full">
+                  Cargar estos {autoGames.filter(g => g.dateStr === selectedDate).length} juegos
+                </button>
+              )}
+            </div>
+          )}
 
-          <PickOfDay matchups={matchups} oddsMap={oddsMap} bankroll={bankroll} />
-          <BetLogPanel entries={betLog} setEntries={setBetLog} />
-          <ReportsPanel entries={betLog} />
-        </div>
+          <div className="px-6 py-5 layout-grid" style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: "24px", alignItems: "start" }}>
+            <div className="sidebar-col space-y-4" style={{ position: "sticky", top: "130px" }}>
+              <div className="rounded-2xl bg-card ring-1 ring-white-06 p-4">
+                <div className="flex items-center justify-between">
+                  <span className="fs-10 uppercase tracking-wider text-white/40 font-semibold">Bankroll</span>
+                  <div className="flex items-center gap-1">
+                    <span className="text-sm font-mono text-white/40">$</span>
+                    <input type="text" inputMode="numeric" value={bankroll} onChange={(e) => setBankroll(e.target.value.replace(/[^0-9]/g, ""))} className="w-20 bg-input ring-1 ring-white/10 focus-ring-accent rounded-lg px-2 py-1 text-right font-mono text-sm text-brand" />
+                  </div>
+                </div>
+              </div>
+              <PickOfDay matchups={matchups} oddsMap={oddsMap} bankroll={bankroll} />
+            </div>
 
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <span className="font-display text-base font-bold tracking-wide text-white/50">PARTIDOS</span>
-            <span className="text-sm text-white/30">{matchups.filter(m => m.home && m.away).length} cargados</span>
+            <div>
+              <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))" }}>
+                {matchups.map((m) => (
+                  <MatchupCardCompact
+                    key={m.id}
+                    matchup={m}
+                    odds={oddsMap[m.id] || {}}
+                    onOpen={() => setOpenId(m.id)}
+                    onRemove={() => removeMatchup(m.id)}
+                    teams={teams}
+                    setMatchup={(patch) => updateMatchup(m.id, patch)}
+                  />
+                ))}
+                <button onClick={addMatchup} className="rounded-2xl ring-1 ring-dashed ring-white/15 text-white/40 text-sm font-semibold py-10 active:bg-white/[0.02]">
+                  + Agregar cruce
+                </button>
+              </div>
+              <p className="fs-9 text-white/20 text-center pt-6 leading-relaxed">
+                {pipelineStatus === "ok" ? "Datos generados automáticamente por GitHub Actions." : "Elo de respaldo — editable."}<br/>
+                Herramienta de análisis, no garantiza resultados.
+              </p>
+            </div>
           </div>
-          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
-            {matchups.map((m) => (
-              <MatchupCardCompact
-                key={m.id}
-                matchup={m}
-                odds={oddsMap[m.id] || {}}
-                onOpen={() => setOpenId(m.id)}
-                onRemove={() => removeMatchup(m.id)}
-                teams={teams}
-                setMatchup={(patch) => updateMatchup(m.id, patch)}
-              />
-            ))}
-            <button onClick={addMatchup} className="rounded-xl ring-1 ring-dashed ring-white/15 text-white/40 text-sm font-semibold py-8 active:bg-white/[0.02]">
-              + Agregar cruce
-            </button>
-          </div>
+        </>
+      )}
 
-          <p className="fs-9 text-white/20 text-center pt-6 leading-relaxed">
-            {pipelineStatus === "ok" ? "Datos generados automáticamente por GitHub Actions." : "Elo de respaldo — editable."}<br/>
-            Herramienta de análisis, no garantiza resultados.
-          </p>
-        </div>
-      </div>
+      {activeTab === "log" && <div className="px-6 py-6 max-w-4xl mx-auto"><BetLogTab entries={betLog} setEntries={setBetLog} /></div>}
+      {activeTab === "reports" && <div className="px-6 py-6 max-w-3xl mx-auto"><ReportsTab entries={betLog} /></div>}
+      {activeTab === "health" && <div className="px-6 py-6 max-w-3xl mx-auto"><ModelHealthTab entries={betLog} /></div>}
 
       {openMatchup && (
         <MatchupDetailPanel

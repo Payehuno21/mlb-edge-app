@@ -106,6 +106,7 @@ function normalizeTeamsFromPipeline(payload) {
     elo: t.elo, runsPerGame: t.runsPerGame, staffEra: t.staffEra,
     topPowerHitter: t.topPowerHitter, topContactHitter: t.topContactHitter,
     missingStarters: t.missingStarters ?? [],
+    bullpenRecentIp: t.bullpenRecentIp ?? null,
   })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -968,6 +969,18 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
             </div>
           )}
 
+          {((matchup.home?.bullpenRecentIp ?? 0) > 9 || (matchup.away?.bullpenRecentIp ?? 0) > 9) && (
+            <div className="rounded-xl bg-amber-400/10 ring-1 ring-amber-400/30 px-4 py-3">
+              <p className="fs-9 uppercase tracking-wider text-amber-300 font-semibold mb-1">Bullpen cargado</p>
+              {(matchup.away?.bullpenRecentIp ?? 0) > 9 && (
+                <p className="fs-10 text-white/60">{matchup.away.abbr}: {matchup.away.bullpenRecentIp} entradas de bullpen en los últimos 3 días — viene con más carga de lo normal, el modelo ya lo refleja en su ERA efectivo.</p>
+              )}
+              {(matchup.home?.bullpenRecentIp ?? 0) > 9 && (
+                <p className="fs-10 text-white/60 mt-1">{matchup.home.abbr}: {matchup.home.bullpenRecentIp} entradas de bullpen en los últimos 3 días — viene con más carga de lo normal, el modelo ya lo refleja en su ERA efectivo.</p>
+              )}
+            </div>
+          )}
+
           {matchup.weather && (
             <div className="rounded-xl bg-white-02 ring-1 ring-white/5 px-4 py-3 flex items-center justify-between">
               <div>
@@ -1503,8 +1516,6 @@ export default function MLBEdge() {
   const [pipelineMeta, setPipelineMeta] = useState(null);
   const [teams, setTeams] = useState(TEAMS_FALLBACK);
   const [autoGames, setAutoGames] = useState([]);
-  const [availableDates, setAvailableDates] = useState([]);
-  const [selectedDate, setSelectedDate] = useState(null);
   const [calendarLoadedId, setCalendarLoadedId] = useState(null);
 
   const loadPipeline = useCallback(async () => {
@@ -1516,11 +1527,8 @@ export default function MLBEdge() {
       if (!normTeams.length) throw new Error("El JSON no trae equipos.");
       const teamsById = Object.fromEntries(payload.teams.map(t => [t.id, normTeams.find(nt => nt.id === t.id)]));
       const normGames = normalizeGamesFromPipeline(payload, teamsById);
-      const dates = payload.availableDates ?? [payload.date];
       setTeams(normTeams);
       setAutoGames(normGames);
-      setAvailableDates(dates);
-      setSelectedDate((prev) => prev && dates.includes(prev) ? prev : dates[0]);
       setPipelineMeta({ generatedAt: payload.generatedAt, date: payload.date, lastMode: payload.lastMode ?? "full" });
       setPipelineStatus("ok");
 
@@ -1675,29 +1683,14 @@ export default function MLBEdge() {
               </div>
             </div>
           )}
-          {pipelineStatus === "ok" && availableDates.length > 0 && (
+          {pipelineStatus === "ok" && autoGames.length > 0 && (
             <div className="px-6 pt-4 flex items-center gap-3 flex-wrap">
-              <div className="flex gap-2">
-                {availableDates.map((d, i) => {
-                  const dt = new Date(d + "T12:00:00");
-                  const label = i === 0 ? "Hoy" : i === 1 ? "Mañana" : dt.toLocaleDateString([], { weekday: "short", day: "numeric" });
-                  const count = autoGames.filter(g => g.dateStr === d).length;
-                  const active = selectedDate === d;
-                  return (
-                    <button
-                      key={d}
-                      onClick={() => setSelectedDate(d)}
-                      className="font-display fs-10 font-bold px-3.5 py-2 rounded-full transition-all"
-                      style={active ? { color: "#00FFB2", background: "rgba(0,255,178,0.1)", boxShadow: "0 0 0 1px rgba(0,255,178,0.3) inset" } : { color: "rgba(255,255,255,0.4)", background: "rgba(255,255,255,0.03)", boxShadow: "0 0 0 1px rgba(255,255,255,0.08) inset" }}
-                    >
-                      {label} · {count}
-                    </button>
-                  );
-                })}
-              </div>
-              {autoGames.filter(g => g.dateStr === selectedDate).length > 0 && calendarLoadedId !== selectedDate && (
-                <button onClick={() => loadCalendarForDate(selectedDate)} className="font-display fs-10 font-bold text-amber-300 bg-amber-400/10 ring-1 ring-amber-400/30 px-4 py-2 rounded-full">
-                  Cargar estos {autoGames.filter(g => g.dateStr === selectedDate).length} juegos
+              <span className="font-display fs-10 font-bold px-3.5 py-2 rounded-full" style={{ color: "#00FFB2", background: "rgba(0,255,178,0.1)", boxShadow: "0 0 0 1px rgba(0,255,178,0.3) inset" }}>
+                Hoy · {autoGames.length}
+              </span>
+              {calendarLoadedId !== (pipelineMeta?.date ?? "loaded") && (
+                <button onClick={() => loadCalendarForDate(pipelineMeta?.date)} className="font-display fs-10 font-bold text-amber-300 bg-amber-400/10 ring-1 ring-amber-400/30 px-4 py-2 rounded-full">
+                  Cargar estos {autoGames.length} juegos
                 </button>
               )}
             </div>

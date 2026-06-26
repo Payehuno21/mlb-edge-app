@@ -125,6 +125,7 @@ function normalizeGamesFromPipeline(payload, teamsById) {
       weather: g.weather ?? null,
       venue: g.venue ?? null,
       autoOdds: g.autoOdds ?? null,
+      autoProps: g.autoProps ?? [],
     };
   }).filter(Boolean);
 }
@@ -318,6 +319,23 @@ function suggestPropsFromPipeline(matchup) {
     props.push({ type: "1+ Hit", player: away.topContactHitter.name, note: `AVG ${away.topContactHitter.avg.toFixed(3)} (${away.abbr})`, confidence: Math.min(gameProb * 100, 88) });
   }
   return props.slice(0, 2);
+}
+
+// Combina props reales de mercado (The Odds API, con momio real ya incluido)
+// con la heurística de temporada — prioriza las reales porque vienen con
+// precio de mercado de verdad, no una suposición sobre la tasa de temporada.
+function getPropsForMatchup(matchup) {
+  const real = matchup.autoPropsFromOdds ?? [];
+  if (real.length > 0) {
+    return real.map(p => ({
+      type: p.type,
+      player: p.player,
+      decimalOdds: p.decimalOdds,
+      line: p.line,
+      isReal: true,
+    }));
+  }
+  return suggestPropsFromPipeline(matchup).map(p => ({ ...p, isReal: false }));
 }
 
 // ---------------------------------------------------------------------------
@@ -714,18 +732,34 @@ function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll })
   const [propOdds, setPropOdds] = useState({});
   const parsedManual = useMemo(() => parsePropsText(value), [value]);
   const hasAuto = autoProps && autoProps.length > 0;
+  const isReal = hasAuto && autoProps[0]?.isReal;
 
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
-        <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold flex items-center gap-1.5"><Flame size={12}/> Props {hasAuto && <CheckCircle2 size={12} className="text-accent" />}</p>
+        <p className="fs-10 uppercase tracking-wider text-white/35 font-semibold flex items-center gap-1.5">
+          <Flame size={12}/> Props {hasAuto && <CheckCircle2 size={12} className="text-accent" />} {isReal && <span className="fs-9 text-white/30 font-normal normal-case">· momio real de mercado</span>}
+        </p>
         {!hasAuto && (
           <button onClick={() => setEditing(!editing)} className="flex items-center gap-1 fs-9 text-white/40 font-semibold uppercase">
             <Pencil size={10} /> {editing ? "listo" : "pegar"}
           </button>
         )}
       </div>
-      {hasAuto ? (
+      {hasAuto && isReal ? (
+        <div className="space-y-2">
+          {autoProps.map((p, i) => (
+            <div key={i} className="grid items-center gap-2" style={{ gridTemplateColumns: "1fr 64px 28px" }}>
+              <span className="text-sm font-bold text-brand truncate">{p.player} <span className="text-white/40 font-normal">· {p.type}{p.line ? ` ${p.line}+` : ""}</span></span>
+              <span className="font-mono text-sm font-bold text-brand text-right">{Number(p.decimalOdds).toFixed(2)}</span>
+              {onLog ? (
+                <button onClick={() => onLog({ ...logContext, market: "Prop", label: `${p.player} · ${p.type}`, prob: null, odds: p.decimalOdds, edge: null, stake: 0 })} className="w-6 h-6 rounded-full bg-accent-chip ring-1 ring-accent-30 text-accent text-sm font-bold flex items-center justify-center justify-self-end">+</button>
+              ) : <span />}
+            </div>
+          ))}
+          <p className="fs-9 text-white/25 leading-relaxed">Momio real del mercado (The Odds API). Sin probabilidad de modelo propia para esta prop — decide tú el tamaño de la apuesta al registrarla.</p>
+        </div>
+      ) : hasAuto ? (
         <div className="space-y-2">
           {autoProps.map((p, i) => {
             const oddsVal = propOdds[i] ?? "";
@@ -839,7 +873,7 @@ function MatchupCardCompact({ matchup, odds, onOpen, onRemove, teams, setMatchup
 function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankroll, onAddToLog }) {
   const [f5Open, setF5Open] = useState(false);
   const model = buildModel(matchup);
-  const autoProps = suggestPropsFromPipeline(matchup);
+  const autoProps = getPropsForMatchup(matchup);
   const matchupLabel = `${matchup.away.abbr} @ ${matchup.home.abbr}`;
   const logContext = {
     matchup: matchupLabel,
@@ -1459,7 +1493,7 @@ export default function MLBEdge() {
       setAutoGames(normGames);
       setAvailableDates(dates);
       setSelectedDate((prev) => prev && dates.includes(prev) ? prev : dates[0]);
-      setPipelineMeta({ generatedAt: payload.generatedAt, date: payload.date });
+      setPipelineMeta({ generatedAt: payload.generatedAt, date: payload.date, lastMode: payload.lastMode ?? "full" });
       setPipelineStatus("ok");
 
       const resultsByGamePk = Object.fromEntries((payload.results ?? []).map(r => [r.gamePk, r]));
@@ -1487,6 +1521,7 @@ export default function MLBEdge() {
         home: g.home, away: g.away, timeLabel: g.timeLabel,
         homeStarter: g.homeStarter, awayStarter: g.awayStarter, weather: g.weather,
         gamePk: g.gamePk,
+        autoPropsFromOdds: g.autoProps ?? [],
       };
       newMatchups.push(m);
       const ao = g.autoOdds;
@@ -1561,6 +1596,11 @@ export default function MLBEdge() {
             <p className="fs-9 text-white/35 mt-1 tracking-wide">TEMPORADA 2026 · PIPELINE AUTÓNOMO{autoGames.length > 0 ? ` · ${autoGames.length} JUEGOS` : ""}</p>
           </div>
           <div className="flex items-center gap-2.5">
+            {pipelineStatus === "ok" && pipelineMeta?.generatedAt && (
+              <span className="fs-9 text-white/30 font-mono hidden sm:inline">
+                {pipelineMeta.lastMode === "refresh" ? "Abridores/momios actualizados" : "Última corrida completa"} {new Date(pipelineMeta.generatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+              </span>
+            )}
             {pipelineStatus === "ok" && (
               <span className="fs-9 font-bold uppercase text-accent bg-accent-chip ring-1 ring-accent-30 px-3 py-1.5 rounded-full flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-accent" style={{ boxShadow: "0 0 6px #00FFB2" }} /> Live

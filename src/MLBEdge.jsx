@@ -133,6 +133,7 @@ function normalizeGamesFromPipeline(payload, teamsById) {
     return {
       gamePk: g.gamePk,
       timeLabel: time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+      gameStartMs: time.getTime(),
       dateStr: g.gameDateStr ?? g.gameDate?.slice(0, 10),
       home, away,
       homeStarter: g.homeStarter ?? null,
@@ -892,7 +893,8 @@ function MatchupCardCompact({ matchup, odds, onOpen, onRemove, teams, setMatchup
   }
 
   const model = buildModel(matchup);
-  const bothMlFilled = !matchup.liveState && !!(odds.mlHome && odds.mlAway) && isSanePregameOdds(odds.mlHome) && isSanePregameOdds(odds.mlAway);
+  const gameAlreadyStarted = !!matchup.liveState || (matchup.gameStartMs && matchup.gameStartMs <= Date.now());
+  const bothMlFilled = !gameAlreadyStarted && !!(odds.mlHome && odds.mlAway) && isSanePregameOdds(odds.mlHome) && isSanePregameOdds(odds.mlAway);
   const mlHomeEdge = bothMlFilled ? edgePct(model.homeWinProb, odds.mlHome) : null;
   const mlAwayEdge = bothMlFilled ? edgePct(model.awayWinProb, odds.mlAway) : null;
   const bestEdge = [mlHomeEdge, mlAwayEdge].filter(e => e !== null && !Number.isNaN(e));
@@ -956,7 +958,7 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
     awayAbbr: matchup.away.abbr,
   };
   const liveStateLabel = formatLiveState(matchup.liveState, matchup.home.abbr, matchup.away.abbr);
-  const isLiveOrFinal = !!matchup.liveState;
+  const isLiveOrFinal = !!matchup.liveState || (matchup.gameStartMs && matchup.gameStartMs <= Date.now());
 
   const mlHomeEdge = edgePct(model.homeWinProb, odds.mlHome);
   const mlAwayEdge = edgePct(model.awayWinProb, odds.mlAway);
@@ -1014,12 +1016,17 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
             ))}
           </div>
 
-          {matchup.liveState && (
+          {matchup.liveState ? (
             <div className="rounded-xl bg-amber-400/10 ring-1 ring-amber-400/40 px-4 py-3">
               <p className="fs-9 uppercase tracking-wider text-amber-300 font-semibold mb-1">{matchup.liveState.status === "Final" ? "Juego finalizado" : "Juego en curso"}</p>
               <p className="fs-10 text-white/60">{liveStateLabel} (al momento de la última corrida del pipeline). Los momios pre-partido ya no aplican — cualquier fila marcada "momio fuera de rango" abajo es por esto.</p>
             </div>
-          )}
+          ) : isLiveOrFinal ? (
+            <div className="rounded-xl bg-amber-400/10 ring-1 ring-amber-400/40 px-4 py-3">
+              <p className="fs-9 uppercase tracking-wider text-amber-300 font-semibold mb-1">Ya pasó la hora de inicio</p>
+              <p className="fs-10 text-white/60">Este juego ya debería haber empezado ({matchup.timeLabel}) — los momios pre-partido del último pipeline ya no son confiables. Espera a la próxima corrida para datos actualizados.</p>
+            </div>
+          ) : null}
 
           {(matchup.home?.missingStarters?.length > 0 || matchup.away?.missingStarters?.length > 0) && (
             <div className="rounded-xl bg-red-500/10 ring-1 ring-red-500/30 px-4 py-3">
@@ -1165,7 +1172,8 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
     let top = null;
     for (const m of matchups) {
       if (!m.home || !m.away) continue;
-      if (m.liveState) continue; // juego ya en curso o terminado — sus momios pre-partido ya no aplican
+      if (m.liveState) continue; // juego ya en curso o terminado, detectado por el pipeline
+      if (m.gameStartMs && m.gameStartMs <= Date.now()) continue; // ya pasó la hora de inicio, aunque el pipeline no lo haya detectado todavía — sus momios pre-partido ya no son confiables
       const model = buildModel(m);
       const odds = oddsMap[m.id] || {};
       const modelFavIsHome = model.homeIsFavorite;
@@ -1689,6 +1697,7 @@ export default function MLBEdge() {
         home: g.home, away: g.away, timeLabel: g.timeLabel,
         homeStarter: g.homeStarter, awayStarter: g.awayStarter, weather: g.weather,
         gamePk: g.gamePk,
+        gameStartMs: g.gameStartMs,
         autoPropsFromOdds: g.autoProps ?? [],
         lineMovement: g.lineMovement ?? [],
         liveState: g.liveState ?? null,

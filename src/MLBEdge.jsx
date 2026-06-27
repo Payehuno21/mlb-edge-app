@@ -25,6 +25,19 @@ const TEAM_COLORS = {
 
 // Logos oficiales de MLB vía el CDN público mlbstatic.com, indexados por
 // team id (el mismo id que usa MLB Stats API en todo el pipeline).
+// Formatea el estado del juego (Live/Final) al momento de la última corrida
+// del pipeline. No se actualiza en tiempo real dentro de la app — es un
+// snapshot, igual que el resto de los datos, pero ayuda a explicar por qué
+// un momio pre-partido ya no aplica (el juego ya inició).
+function formatLiveState(liveState, homeAbbr, awayAbbr) {
+  if (!liveState) return null;
+  const score = `${awayAbbr} ${liveState.awayScore ?? "?"} - ${liveState.homeScore ?? "?"} ${homeAbbr}`;
+  if (liveState.status === "Final") return `Final: ${score}`;
+  const half = liveState.inningHalf === "Top" ? "Alta" : liveState.inningHalf === "Bottom" ? "Baja" : "";
+  const inningLabel = liveState.inning ? `${half} ${liveState.inning}ª` : "En vivo";
+  return `${inningLabel}: ${score}`;
+}
+
 function teamLogoUrl(teamId) {
   if (!teamId) return null;
   return `https://www.mlbstatic.com/team-logos/${teamId}.svg`;
@@ -129,6 +142,7 @@ function normalizeGamesFromPipeline(payload, teamsById) {
       autoOdds: g.autoOdds ?? null,
       autoProps: g.autoProps ?? [],
       lineMovement: g.lineMovement ?? [],
+      liveState: g.liveState ?? null,
     };
   }).filter(Boolean);
 }
@@ -907,7 +921,9 @@ function MatchupCardCompact({ matchup, odds, onOpen, onRemove, teams, setMatchup
         </div>
         {tier && <TierChip edge={topEdge} />}
       </div>
-      <p className="fs-10 font-mono text-white/30 mb-4">{matchup.timeLabel ?? ""} · total {model.projectedTotal.toFixed(1)}</p>
+      <p className="fs-10 font-mono mb-4" style={{ color: matchup.liveState ? "#FFB200" : "rgba(255,255,255,0.3)" }}>
+        {matchup.liveState ? formatLiveState(matchup.liveState, matchup.home.abbr, matchup.away.abbr) : (matchup.timeLabel ?? "")} · total {model.projectedTotal.toFixed(1)}
+      </p>
       <div>
         <div className="flex items-center justify-between py-2 border-t border-white/[0.05]">
           <span className="text-sm font-bold text-brand">{matchup.away.abbr}</span>
@@ -939,6 +955,7 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
     homeAbbr: matchup.home.abbr,
     awayAbbr: matchup.away.abbr,
   };
+  const liveStateLabel = formatLiveState(matchup.liveState, matchup.home.abbr, matchup.away.abbr);
 
   const mlHomeEdge = edgePct(model.homeWinProb, odds.mlHome);
   const mlAwayEdge = edgePct(model.awayWinProb, odds.mlAway);
@@ -995,6 +1012,13 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
               </div>
             ))}
           </div>
+
+          {matchup.liveState && (
+            <div className="rounded-xl bg-amber-400/10 ring-1 ring-amber-400/40 px-4 py-3">
+              <p className="fs-9 uppercase tracking-wider text-amber-300 font-semibold mb-1">{matchup.liveState.status === "Final" ? "Juego finalizado" : "Juego en curso"}</p>
+              <p className="fs-10 text-white/60">{liveStateLabel} (al momento de la última corrida del pipeline). Los momios pre-partido ya no aplican — cualquier fila marcada "momio fuera de rango" abajo es por esto.</p>
+            </div>
+          )}
 
           {(matchup.home?.missingStarters?.length > 0 || matchup.away?.missingStarters?.length > 0) && (
             <div className="rounded-xl bg-red-500/10 ring-1 ring-red-500/30 px-4 py-3">
@@ -1665,6 +1689,7 @@ export default function MLBEdge() {
         gamePk: g.gamePk,
         autoPropsFromOdds: g.autoProps ?? [],
         lineMovement: g.lineMovement ?? [],
+        liveState: g.liveState ?? null,
       };
       newMatchups.push(m);
       const ao = g.autoOdds;

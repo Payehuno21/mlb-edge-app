@@ -652,7 +652,8 @@ function BetRow({ label, prob, oddsValue, edge, onOddsChange, bankroll, onLog, l
   const stake = kelly && kelly > 0 && bankroll ? kelly * Number(bankroll) : null;
   const isLogged = loggedKeys?.has(betRowKey(logContext?.gamePk, logContext?.market, label));
   const canLog = onLog && oddsValue && !isLogged;
-  const showTier = oddsValue && bothSidesFilled;
+  const isOutOfRange = oddsValue && !isSanePregameOdds(oddsValue);
+  const showTier = oddsValue && bothSidesFilled && !isOutOfRange;
   const positive = (edge ?? 0) >= 0;
   return (
     <div className={`grid items-center gap-3 py-2.5 border-b border-white/[0.04] last:border-b-0 ${isLogged ? "opacity-60" : ""}`} style={{ gridTemplateColumns: "56px 1fr 84px 80px 40px" }}>
@@ -670,6 +671,8 @@ function BetRow({ label, prob, oddsValue, edge, onOddsChange, bankroll, onLog, l
             </span>
             <TierChip edge={edge} />
           </>
+        ) : isOutOfRange ? (
+          <span className="fs-9 text-amber-400 italic text-right" title="Probabilidad implícita fuera de 8%-92%, probablemente momio en vivo o dato corrupto — no se calcula edge.">momio fuera de rango</span>
         ) : oddsValue ? (
           <span className="fs-9 text-white/25 italic text-right">falta el otro lado</span>
         ) : (
@@ -875,7 +878,7 @@ function MatchupCardCompact({ matchup, odds, onOpen, onRemove, teams, setMatchup
   }
 
   const model = buildModel(matchup);
-  const bothMlFilled = !!(odds.mlHome && odds.mlAway);
+  const bothMlFilled = !!(odds.mlHome && odds.mlAway) && isSanePregameOdds(odds.mlHome) && isSanePregameOdds(odds.mlAway);
   const mlHomeEdge = bothMlFilled ? edgePct(model.homeWinProb, odds.mlHome) : null;
   const mlAwayEdge = bothMlFilled ? edgePct(model.awayWinProb, odds.mlAway) : null;
   const bestEdge = [mlHomeEdge, mlAwayEdge].filter(e => e !== null && !Number.isNaN(e));

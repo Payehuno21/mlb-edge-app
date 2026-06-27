@@ -1314,12 +1314,22 @@ function BetLogTab({ entries, setEntries }) {
   const [resultFilter, setResultFilter] = useState("all");
   const [marketFilter, setMarketFilter] = useState("all");
   const [simFilter, setSimFilter] = useState("real"); // "real" | "sim" | "all" — default real para ver siempre tu dinero real primero
+  const [dateFilter, setDateFilter] = useState("today"); // "today" | "all" — default hoy para que la vista no se sienta infinita
+
+  const todayISO = useMemo(() => new Date().toISOString().slice(0, 10), []);
+
+  const dateScopedEntries = useMemo(() => {
+    if (dateFilter === "all") return entries;
+    // Entradas sin dateISO (de antes de que existiera ese campo) se quedan
+    // fuera de "hoy" por definición, pero siguen contando en "Todas".
+    return entries.filter(e => e.dateISO === todayISO);
+  }, [entries, dateFilter, todayISO]);
 
   const scopedEntries = useMemo(() => {
-    if (simFilter === "all") return entries;
-    if (simFilter === "sim") return entries.filter(e => e.isSimulation);
-    return entries.filter(e => !e.isSimulation);
-  }, [entries, simFilter]);
+    if (simFilter === "all") return dateScopedEntries;
+    if (simFilter === "sim") return dateScopedEntries.filter(e => e.isSimulation);
+    return dateScopedEntries.filter(e => !e.isSimulation);
+  }, [dateScopedEntries, simFilter]);
 
   const summary = useMemo(() => summarizeLog(scopedEntries), [scopedEntries]);
 
@@ -1369,6 +1379,21 @@ function BetLogTab({ entries, setEntries }) {
 
   return (
     <div className="space-y-5">
+      <div className="flex gap-2">
+        {[{ k: "today", l: "Hoy" }, { k: "all", l: "Todas las fechas" }].map(opt => (
+          <button
+            key={opt.k}
+            onClick={() => setDateFilter(opt.k)}
+            className="flex-1 fs-10 font-bold uppercase tracking-wide py-2.5 rounded-lg transition-all"
+            style={dateFilter === opt.k
+              ? { color: "#00D9FF", background: "rgba(0,217,255,0.1)", boxShadow: "0 0 0 1px rgba(0,217,255,0.3) inset" }
+              : { color: "rgba(255,255,255,0.4)", background: "rgba(255,255,255,0.03)", boxShadow: "0 0 0 1px rgba(255,255,255,0.08) inset" }}
+          >
+            {opt.l}
+          </button>
+        ))}
+      </div>
+
       <div className="flex gap-2">
         {[{ k: "real", l: "Reales" }, { k: "sim", l: "Simulación" }, { k: "all", l: "Todas" }].map(opt => (
           <button
@@ -1428,7 +1453,13 @@ function BetLogTab({ entries, setEntries }) {
 
       {filtered.length === 0 ? (
         <div className="rounded-xl bg-card ring-1 ring-white-06 px-5 py-8 text-center">
-          <p className="text-sm text-white/35">{entries.length === 0 ? "Sin apuestas registradas todavía. Usa el botón + junto a cualquier momio." : "Ninguna apuesta coincide con esos filtros."}</p>
+          <p className="text-sm text-white/35">
+            {entries.length === 0
+              ? "Sin apuestas registradas todavía. Usa el botón + junto a cualquier momio."
+              : dateFilter === "today" && dateScopedEntries.length === 0
+              ? "Sin apuestas registradas hoy todavía — cambia a \"Todas las fechas\" para ver tu historial completo."
+              : "Ninguna apuesta coincide con esos filtros."}
+          </p>
         </div>
       ) : (
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))" }}>

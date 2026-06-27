@@ -142,6 +142,17 @@ function impliedProbDecimal(decOdds) {
   return 1 / d;
 }
 
+// Un momio pre-partido razonable de MLB implica entre 8% y 92% de
+// probabilidad — fuera de ese rango casi siempre es señal de un momio EN
+// VIVO (el juego ya empezó, las cuotas cambian con el marcador) o un dato
+// corrupto, no una oportunidad real. Filtro de cordura antes de confiar en
+// cualquier candidato para la Apuesta Máxima.
+function isSanePregameOdds(decOdds) {
+  const imp = impliedProbDecimal(decOdds);
+  if (imp === null) return false;
+  return imp >= 0.08 && imp <= 0.92;
+}
+
 function edgePct(modelProb, decOdds) {
   const imp = impliedProbDecimal(decOdds);
   if (imp === null || modelProb === null || modelProb === undefined) return null;
@@ -1159,6 +1170,7 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
       ];
       for (const c of candidates) {
         if (!c.odd || !c.otherOdd || c.prob === null || c.prob === undefined) continue;
+        if (!isSanePregameOdds(c.odd) || !isSanePregameOdds(c.otherOdd)) continue;
         const e = edgePct(c.prob, c.odd);
         if (e === null || Number.isNaN(e)) continue;
         if (!top || e > top.edge) top = { ...c, edge: e };

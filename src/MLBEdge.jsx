@@ -804,8 +804,11 @@ function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll, l
             const propLabel = `${p.player} · ${p.type}`;
             const isLogged = loggedKeys?.has(betRowKey(logContext?.gamePk, "Prop", propLabel));
             return (
-              <div key={i} className={`grid items-center gap-2 ${isLogged ? "opacity-60" : ""}`} style={{ gridTemplateColumns: hasModel ? "1fr 56px 60px 40px 28px" : "1fr 64px 28px" }}>
-                <span className="text-sm font-bold text-brand truncate">{p.player} <span className="text-white/40 font-normal">· {p.type}{p.line ? ` ${p.line}+` : ""}</span></span>
+              <div key={i} className={`grid items-center gap-2 py-1 ${isLogged ? "opacity-60" : ""}`} style={{ gridTemplateColumns: hasModel ? "1fr 56px 60px 40px 28px" : "1fr 64px 28px" }}>
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-brand truncate">{p.player}</p>
+                  <p className="fs-9 text-white/40 truncate">{p.type}{p.line ? ` ${p.line}+` : ""}</p>
+                </div>
                 <span className="font-mono text-sm font-bold text-brand text-right">{Number(p.decimalOdds).toFixed(2)}</span>
                 {hasModel ? (
                   <>
@@ -834,8 +837,11 @@ function PropsPanel({ value, onChange, autoProps, onLog, logContext, bankroll, l
             const propLabel = `${p.player} · ${p.type}`;
             const isLogged = loggedKeys?.has(betRowKey(logContext?.gamePk, "Prop", propLabel));
             return (
-              <div key={i} className={`grid items-center gap-2 ${isLogged ? "opacity-60" : ""}`} style={{ gridTemplateColumns: "1fr 40px 64px 40px 28px" }}>
-                <span className="text-sm font-bold text-brand truncate">{p.player} <span className="text-white/40 font-normal">· {p.type}</span></span>
+              <div key={i} className={`grid items-center gap-2 py-1 ${isLogged ? "opacity-60" : ""}`} style={{ gridTemplateColumns: "1fr 40px 64px 40px 28px" }}>
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-brand truncate">{p.player}</p>
+                  <p className="fs-9 text-white/40 truncate">{p.type}</p>
+                </div>
                 <span className="fs-10 font-mono text-amber-300 text-right">{p.confidence.toFixed(0)}%</span>
                 <OddsInput value={oddsVal} onChange={(v) => setPropOdds({ ...propOdds, [i]: v })} />
                 <span className="fs-9 font-mono text-amber-300/80 text-right">{stake && stake > 0 ? `$${stake.toFixed(0)}` : ""}</span>

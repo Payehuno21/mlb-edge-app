@@ -1168,8 +1168,8 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
 // PICK OF DAY — "Apuesta Máxima", vive en el sidebar
 // ---------------------------------------------------------------------------
 function PickOfDay({ matchups, oddsMap, bankroll }) {
-  const best = useMemo(() => {
-    let top = null;
+  const topPicks = useMemo(() => {
+    const allCandidates = [];
     for (const m of matchups) {
       if (!m.home || !m.away) continue;
       if (m.liveState) continue; // juego ya en curso o terminado, detectado por el pipeline
@@ -1194,28 +1194,41 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
       const underProb = totalDiff !== null ? 0.5 + Math.min(Math.max(-totalDiff, 0) * 0.09, 0.30) : null;
 
       const candidates = [
-        { label: `ML ${m.home.abbr}`, prob: model.homeWinProb, odd: odds.mlHome, matchup: matchupLabel, otherOdd: odds.mlAway },
-        { label: `ML ${m.away.abbr}`, prob: model.awayWinProb, odd: odds.mlAway, matchup: matchupLabel, otherOdd: odds.mlHome },
-        { label: `${favAbbr} -1.5`, prob: model.favMinus1_5, odd: odds.rlFav, matchup: matchupLabel, otherOdd: odds.rlDog },
-        { label: `${dogAbbr} +1.5`, prob: model.dogPlus1_5, odd: odds.rlDog, matchup: matchupLabel, otherOdd: odds.rlFav },
-        { label: "Over " + (odds.totalLine || ""), prob: overProb, odd: odds.over, matchup: matchupLabel, otherOdd: odds.under },
-        { label: "Under " + (odds.totalLine || ""), prob: underProb, odd: odds.under, matchup: matchupLabel, otherOdd: odds.over },
-        { label: `ML F5 ${m.home.abbr}`, prob: model.f5.homeWinProb, odd: odds.f5MlHome, matchup: matchupLabel, otherOdd: odds.f5MlAway },
-        { label: `ML F5 ${m.away.abbr}`, prob: model.f5.awayWinProb, odd: odds.f5MlAway, matchup: matchupLabel, otherOdd: odds.f5MlHome },
-        { label: `${f5FavAbbr} -0.5 F5`, prob: model.f5.favMinus0_5, odd: odds.f5RlFav, matchup: matchupLabel, otherOdd: odds.f5RlDog },
-        { label: `${f5DogAbbr} +0.5 F5`, prob: model.f5.dogPlus0_5, odd: odds.f5RlDog, matchup: matchupLabel, otherOdd: odds.f5RlFav },
+        { label: `ML ${m.home.abbr}`, prob: model.homeWinProb, odd: odds.mlHome, matchup: matchupLabel, otherOdd: odds.mlAway, gameKey: m.id },
+        { label: `ML ${m.away.abbr}`, prob: model.awayWinProb, odd: odds.mlAway, matchup: matchupLabel, otherOdd: odds.mlHome, gameKey: m.id },
+        { label: `${favAbbr} -1.5`, prob: model.favMinus1_5, odd: odds.rlFav, matchup: matchupLabel, otherOdd: odds.rlDog, gameKey: m.id },
+        { label: `${dogAbbr} +1.5`, prob: model.dogPlus1_5, odd: odds.rlDog, matchup: matchupLabel, otherOdd: odds.rlFav, gameKey: m.id },
+        { label: "Over " + (odds.totalLine || ""), prob: overProb, odd: odds.over, matchup: matchupLabel, otherOdd: odds.under, gameKey: m.id },
+        { label: "Under " + (odds.totalLine || ""), prob: underProb, odd: odds.under, matchup: matchupLabel, otherOdd: odds.over, gameKey: m.id },
+        { label: `ML F5 ${m.home.abbr}`, prob: model.f5.homeWinProb, odd: odds.f5MlHome, matchup: matchupLabel, otherOdd: odds.f5MlAway, gameKey: m.id },
+        { label: `ML F5 ${m.away.abbr}`, prob: model.f5.awayWinProb, odd: odds.f5MlAway, matchup: matchupLabel, otherOdd: odds.f5MlHome, gameKey: m.id },
+        { label: `${f5FavAbbr} -0.5 F5`, prob: model.f5.favMinus0_5, odd: odds.f5RlFav, matchup: matchupLabel, otherOdd: odds.f5RlDog, gameKey: m.id },
+        { label: `${f5DogAbbr} +0.5 F5`, prob: model.f5.dogPlus0_5, odd: odds.f5RlDog, matchup: matchupLabel, otherOdd: odds.f5RlFav, gameKey: m.id },
       ];
       for (const c of candidates) {
         if (!c.odd || !c.otherOdd || c.prob === null || c.prob === undefined) continue;
         if (!isSanePregameOdds(c.odd) || !isSanePregameOdds(c.otherOdd)) continue;
         const e = edgePct(c.prob, c.odd);
         if (e === null || Number.isNaN(e)) continue;
-        if (!top || e > top.edge) top = { ...c, edge: e };
+        allCandidates.push({ ...c, edge: e });
       }
     }
-    return top;
+    allCandidates.sort((a, b) => b.edge - a.edge);
+
+    // Solo el mejor candidato POR JUEGO, para que el Top 3 muestre picks
+    // diversos (3 partidos distintos) en vez de 3 mercados del mismo juego.
+    const seenGames = new Set();
+    const diverse = [];
+    for (const c of allCandidates) {
+      if (seenGames.has(c.gameKey)) continue;
+      seenGames.add(c.gameKey);
+      diverse.push(c);
+      if (diverse.length >= 3) break;
+    }
+    return diverse;
   }, [matchups, oddsMap]);
 
+  const best = topPicks[0];
   const isMaxBet = best && edgeTier(best.edge)?.label === "BET";
 
   if (!best) {
@@ -1228,26 +1241,46 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
   }
 
   return (
-    <div className="rounded-2xl relative overflow-hidden ring-1 ring-accent-glow px-5 py-5 bg-accent-grad">
-      <div className="flex items-center gap-2 mb-3">
-        <Trophy size={15} className="text-accent" />
-        <span className="font-display fs-10 uppercase tracking-widest font-bold text-accent">Apuesta máxima</span>
+    <div className="space-y-3">
+      <div className="rounded-2xl relative overflow-hidden ring-1 ring-accent-glow px-5 py-5 bg-accent-grad">
+        <div className="flex items-center gap-2 mb-3">
+          <Trophy size={15} className="text-accent" />
+          <span className="font-display fs-10 uppercase tracking-widest font-bold text-accent">Apuesta máxima</span>
+        </div>
+        <p className="font-display text-2xl font-bold text-brand leading-tight tracking-wide">{best.label}</p>
+        <p className="text-sm text-white/40 mt-1">{best.matchup} · momio {Number(best.odd).toFixed(2)}</p>
+        <div className="flex items-center gap-2.5 mt-3">
+          <span className="text-3xl font-mono font-bold text-accent">+{best.edge.toFixed(1)}%</span>
+          <TierChip edge={best.edge} size="lg" />
+        </div>
+        {(() => {
+          const k = kellyFraction(best.prob, best.odd);
+          const stake = k && k > 0 && bankroll ? k * Number(bankroll) : null;
+          return stake ? (
+            <p className="text-sm text-white/35 mt-3">¼ Kelly: <span className="text-amber-200 font-mono">${stake.toFixed(0)}</span> sobre ${Number(bankroll).toLocaleString()}</p>
+          ) : null;
+        })()}
+        {!isMaxBet && (
+          <p className="fs-9 text-white/30 mt-3 leading-relaxed italic">Mejor edge disponible hoy, pero no alcanza el umbral BET (≥6%) — trátalo como referencia.</p>
+        )}
       </div>
-      <p className="font-display text-2xl font-bold text-brand leading-tight tracking-wide">{best.label}</p>
-      <p className="text-sm text-white/40 mt-1">{best.matchup} · momio {Number(best.odd).toFixed(2)}</p>
-      <div className="flex items-center gap-2.5 mt-3">
-        <span className="text-3xl font-mono font-bold text-accent">+{best.edge.toFixed(1)}%</span>
-        <TierChip edge={best.edge} size="lg" />
-      </div>
-      {(() => {
-        const k = kellyFraction(best.prob, best.odd);
-        const stake = k && k > 0 && bankroll ? k * Number(bankroll) : null;
-        return stake ? (
-          <p className="text-sm text-white/35 mt-3">¼ Kelly: <span className="text-amber-200 font-mono">${stake.toFixed(0)}</span> sobre ${Number(bankroll).toLocaleString()}</p>
-        ) : null;
-      })()}
-      {!isMaxBet && (
-        <p className="fs-9 text-white/30 mt-3 leading-relaxed italic">Mejor edge disponible hoy, pero no alcanza el umbral BET (≥6%) — trátalo como referencia.</p>
+
+      {topPicks.length > 1 && (
+        <div className="rounded-2xl bg-card ring-1 ring-white-06 p-3 space-y-2">
+          <p className="fs-9 uppercase tracking-wider text-white/30 font-semibold px-1">Top {topPicks.length} del día</p>
+          {topPicks.map((p, i) => (
+            <div key={i} className="flex items-center justify-between px-2 py-1.5 rounded-lg" style={{ background: i === 0 ? "rgba(0,255,178,0.06)" : "transparent" }}>
+              <div className="min-w-0">
+                <p className="text-sm font-bold text-brand truncate">#{i + 1} {p.label}</p>
+                <p className="fs-9 text-white/35 truncate">{p.matchup} · {Number(p.odd).toFixed(2)}</p>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                <span className="font-mono fs-10 font-bold" style={{ color: p.edge >= 0 ? "#00FFB2" : "#FF3D71" }}>+{p.edge.toFixed(1)}%</span>
+                <TierChip edge={p.edge} />
+              </div>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

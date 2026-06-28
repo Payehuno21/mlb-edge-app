@@ -176,7 +176,7 @@ function edgePct(modelProb, decOdds) {
 
 function edgeTier(edge) {
   if (edge === null || edge === undefined || Number.isNaN(edge)) return null;
-  if (edge >= 8) return { label: "BET", color: "#39FF7A", glow: true };
+  if (edge >= 6) return { label: "BET", color: "#39FF7A", glow: true };
   if (edge >= 2.5) return { label: "LEAN", color: "#FFB319", glow: false };
   if (edge > -2.5) return { label: "PASS", color: "#6B7280", glow: false };
   return { label: "FADE", color: "#FF4655", glow: false };
@@ -195,6 +195,19 @@ function kellyFraction(modelProb, decOdds, fractionalMultiplier = 0.25) {
 
 function eloWinProb(diff) {
   return 1 / (1 + Math.pow(10, -diff / 400));
+}
+
+// CALIBRACIÓN — el modelo, al combinar varios factores (abridor + ausencias
+// + bullpen + splits + forma) en la misma dirección, puede acumular más
+// confianza de la que la realidad respalda. Datos reales de la bitácora
+// (210 apuestas liquidadas, días 1-3) mostraron: cuando el modelo dice
+// 70-80%, la realidad fue 53.7% (-21pp); cuando dice 80%+, fue 50.0% (-40pp).
+// SHRINKAGE_FACTOR comprime la probabilidad hacia 50% proporcionalmente a su
+// distancia del centro. Debe coincidir con el mismo valor en model.py
+// (Python, usado por el correo) para que ambos den el mismo número.
+const SHRINKAGE_FACTOR = 0.75;
+function shrinkProb(p, factor = SHRINKAGE_FACTOR) {
+  return 0.5 + (p - 0.5) * factor;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,12 +258,10 @@ function pitcherScore(starter) {
   const leagueEra = 4.20;
   const leagueWhip = 1.30;
   const leagueK9 = 8.5;
-  const era = Math.max(starter.era, 2.0); // floor: ERAs de muestra pequeña (<2.0) son poco confiables
-  const eraAdj = (leagueEra - era) * 55;
+  const eraAdj = (leagueEra - starter.era) * 55;   // peso dominante
   const whipAdj = (leagueWhip - (starter.whip ?? leagueWhip)) * 70;
   const k9Adj = ((starter.k9 ?? leagueK9) - leagueK9) * 5;
-  const raw = eraAdj + whipAdj + k9Adj;
-  return Math.max(-120, Math.min(120, raw)); // cap: el abridor influye pero no domina al equipo
+  return eraAdj + whipAdj + k9Adj;
 }
 
 function weatherRunFactor(weather) {
@@ -291,7 +302,7 @@ function buildModel(matchup) {
   const bullpenAdj = ((away.staffEra ?? 4.0) - (home.staffEra ?? 4.0)) * 18;
   diff += bullpenAdj;
 
-  const homeWinProb = eloWinProb(diff);
+  const homeWinProb = shrinkProb(eloWinProb(diff));
 
   const leagueAvgTotal = 8.6;
   const offenseFactor = ((home.runsPerGame ?? 4.3) + (away.runsPerGame ?? 4.3)) / 8.6;
@@ -312,7 +323,7 @@ function buildModel(matchup) {
   const dogPlus1_5 = 1 - favMinus1_5;
 
   const f5Diff = diff * 0.62;
-  const f5HomeWinProb = eloWinProb(f5Diff);
+  const f5HomeWinProb = shrinkProb(eloWinProb(f5Diff));
   const f5ExpectedMargin = (f5Diff / 400) * 1.4;
   const f5HomeIsFavorite = f5HomeWinProb >= 0.5;
   const f5FavMinus0_5 = 1 / (1 + Math.exp(-(Math.abs(f5ExpectedMargin) - 0.5) / 1.4));
@@ -1164,7 +1175,7 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
           <PropsPanel value={matchup.propsText} onChange={(v) => setMatchup({ ...matchup, propsText: v })} autoProps={autoProps} onLog={onAddToLog} logContext={logContext} bankroll={bankroll} loggedKeys={loggedKeys} isLiveOrFinal={isLiveOrFinal} />
 
           <p className="fs-9 text-white/25 leading-relaxed pt-2 border-t border-white/[0.06]">
-            Modelo: Elo + abridor + bullpen + splits + forma + clima. RL asigna -1.5/+1.5 según favorito del modelo — usa ⇄ si el mercado real difiere. BET ≥8%, LEAN ≥2.5%, FADE &lt;-2.5%. F5 se cotejan a mano.
+            Modelo: Elo + abridor + bullpen + splits + forma + clima. RL asigna -1.5/+1.5 según favorito del modelo — usa ⇄ si el mercado real difiere. BET ≥6%, LEAN ≥2.5%, FADE &lt;-2.5%. F5 se cotejan a mano.
           </p>
         </div>
       </div>
@@ -1269,7 +1280,7 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
           ) : null;
         })()}
         {!isMaxBet && (
-          <p className="fs-9 text-white/30 mt-3 leading-relaxed italic">Mejor edge disponible hoy, pero no alcanza el umbral BET (≥8%) — trátalo como referencia.</p>
+          <p className="fs-9 text-white/30 mt-3 leading-relaxed italic">Mejor edge disponible hoy, pero no alcanza el umbral BET (≥6%) — trátalo como referencia.</p>
         )}
       </div>
 

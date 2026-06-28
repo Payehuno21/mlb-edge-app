@@ -176,7 +176,7 @@ function edgePct(modelProb, decOdds) {
 
 function edgeTier(edge) {
   if (edge === null || edge === undefined || Number.isNaN(edge)) return null;
-  if (edge >= 6) return { label: "BET", color: "#39FF7A", glow: true };
+  if (edge >= 8) return { label: "BET", color: "#39FF7A", glow: true };
   if (edge >= 2.5) return { label: "LEAN", color: "#FFB319", glow: false };
   if (edge > -2.5) return { label: "PASS", color: "#6B7280", glow: false };
   return { label: "FADE", color: "#FF4655", glow: false };
@@ -245,10 +245,12 @@ function pitcherScore(starter) {
   const leagueEra = 4.20;
   const leagueWhip = 1.30;
   const leagueK9 = 8.5;
-  const eraAdj = (leagueEra - starter.era) * 55;   // peso dominante
+  const era = Math.max(starter.era, 2.0); // floor: ERAs de muestra pequeña (<2.0) son poco confiables
+  const eraAdj = (leagueEra - era) * 55;
   const whipAdj = (leagueWhip - (starter.whip ?? leagueWhip)) * 70;
   const k9Adj = ((starter.k9 ?? leagueK9) - leagueK9) * 5;
-  return eraAdj + whipAdj + k9Adj;
+  const raw = eraAdj + whipAdj + k9Adj;
+  return Math.max(-120, Math.min(120, raw)); // cap: el abridor influye pero no domina al equipo
 }
 
 function weatherRunFactor(weather) {
@@ -1162,7 +1164,7 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
           <PropsPanel value={matchup.propsText} onChange={(v) => setMatchup({ ...matchup, propsText: v })} autoProps={autoProps} onLog={onAddToLog} logContext={logContext} bankroll={bankroll} loggedKeys={loggedKeys} isLiveOrFinal={isLiveOrFinal} />
 
           <p className="fs-9 text-white/25 leading-relaxed pt-2 border-t border-white/[0.06]">
-            Modelo: Elo + abridor + bullpen + splits + forma + clima. RL asigna -1.5/+1.5 según favorito del modelo — usa ⇄ si el mercado real difiere. BET ≥6%, LEAN ≥2.5%, FADE &lt;-2.5%. F5 se cotejan a mano.
+            Modelo: Elo + abridor + bullpen + splits + forma + clima. RL asigna -1.5/+1.5 según favorito del modelo — usa ⇄ si el mercado real difiere. BET ≥8%, LEAN ≥2.5%, FADE &lt;-2.5%. F5 se cotejan a mano.
           </p>
         </div>
       </div>
@@ -1267,7 +1269,7 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
           ) : null;
         })()}
         {!isMaxBet && (
-          <p className="fs-9 text-white/30 mt-3 leading-relaxed italic">Mejor edge disponible hoy, pero no alcanza el umbral BET (≥6%) — trátalo como referencia.</p>
+          <p className="fs-9 text-white/30 mt-3 leading-relaxed italic">Mejor edge disponible hoy, pero no alcanza el umbral BET (≥8%) — trátalo como referencia.</p>
         )}
       </div>
 

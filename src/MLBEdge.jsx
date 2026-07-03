@@ -205,7 +205,7 @@ function eloWinProb(diff) {
 // SHRINKAGE_FACTOR comprime la probabilidad hacia 50% proporcionalmente a su
 // distancia del centro. Debe coincidir con el mismo valor en model.py
 // (Python, usado por el correo) para que ambos den el mismo número.
-const SHRINKAGE_FACTOR = 0.75;
+const SHRINKAGE_FACTOR = 0.65;
 function shrinkProb(p, factor = SHRINKAGE_FACTOR) {
   return 0.5 + (p - 0.5) * factor;
 }

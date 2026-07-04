@@ -210,6 +210,20 @@ function shrinkProb(p, factor = SHRINKAGE_FACTOR) {
   return 0.5 + (p - 0.5) * factor;
 }
 
+// Penalización para picks donde el modelo favorece a un desvalido
+// (prob > 50% pero mercado cotiza odds > 2.0). Los datos reales muestran
+// que en estos casos el win rate es solo 37.5%, muy por debajo del 50%+
+// que el modelo predice. Reduce el exceso de confianza contra el mercado
+// en un 90%. Debe coincidir con UNDERDOG_PENALTY en model.py (Python).
+const UNDERDOG_PENALTY = 0.9;
+function applyUnderdogPenalty(prob, decOdds) {
+  if (!prob || prob <= 0.5 || !decOdds || decOdds < 2.0) return prob;
+  const probMercado = 1.0 / decOdds;
+  const exceso = prob - probMercado;
+  if (exceso <= 0) return prob;
+  return prob - exceso * UNDERDOG_PENALTY;
+}
+
 // ---------------------------------------------------------------------------
 // MERCADO SIN VIG (no-vig) — referencia independiente del modelo, inspirada
 // en el patrón de jrey999/mlb-positive-ev: promedia la probabilidad implícita
@@ -979,8 +993,8 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
   const liveStateLabel = formatLiveState(matchup.liveState, matchup.home.abbr, matchup.away.abbr);
   const isLiveOrFinal = !!matchup.liveState || (matchup.gameStartMs && matchup.gameStartMs <= Date.now());
 
-  const mlHomeEdge = edgePct(model.homeWinProb, odds.mlHome);
-  const mlAwayEdge = edgePct(model.awayWinProb, odds.mlAway);
+  const mlHomeEdge = edgePct(applyUnderdogPenalty(model.homeWinProb, odds.mlHome), odds.mlHome);
+  const mlAwayEdge = edgePct(applyUnderdogPenalty(model.awayWinProb, odds.mlAway), odds.mlAway);
   const totalDiff = odds.totalLine !== "" && odds.totalLine !== undefined ? model.projectedTotal - Number(odds.totalLine) : null;
   const overProb = totalDiff !== null ? 0.5 + Math.min(Math.max(totalDiff, 0) * 0.09, 0.30) : null;
   const underProb = totalDiff !== null ? 0.5 + Math.min(Math.max(-totalDiff, 0) * 0.09, 0.30) : null;
@@ -992,8 +1006,8 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
   const f5UnderProb = f5TotalDiff !== null ? 0.5 + Math.min(Math.max(-f5TotalDiff, 0) * 0.12, 0.30) : null;
   const f5OverEdge = f5OverProb !== null ? edgePct(f5OverProb, odds.f5Over) : null;
   const f5UnderEdge = f5UnderProb !== null ? edgePct(f5UnderProb, odds.f5Under) : null;
-  const f5MlHomeEdge = edgePct(model.f5.homeWinProb, odds.f5MlHome);
-  const f5MlAwayEdge = edgePct(model.f5.awayWinProb, odds.f5MlAway);
+  const f5MlHomeEdge = edgePct(applyUnderdogPenalty(model.f5.homeWinProb, odds.f5MlHome), odds.f5MlHome);
+  const f5MlAwayEdge = edgePct(applyUnderdogPenalty(model.f5.awayWinProb, odds.f5MlAway), odds.f5MlAway);
 
   return (
     <div className="fixed inset-0 z-30 flex justify-end" style={{ background: "rgba(0,0,0,0.6)" }} onClick={onClose}>
@@ -1227,9 +1241,10 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
       for (const c of candidates) {
         if (!c.odd || !c.otherOdd || c.prob === null || c.prob === undefined) continue;
         if (!isSanePregameOdds(c.odd) || !isSanePregameOdds(c.otherOdd)) continue;
-        const e = edgePct(c.prob, c.odd);
+        const probAdj = applyUnderdogPenalty(c.prob, c.odd);
+        const e = edgePct(probAdj, c.odd);
         if (e === null || Number.isNaN(e)) continue;
-        allCandidates.push({ ...c, edge: e });
+        allCandidates.push({ ...c, prob: probAdj, edge: e });
       }
     }
     allCandidates.sort((a, b) => b.edge - a.edge);

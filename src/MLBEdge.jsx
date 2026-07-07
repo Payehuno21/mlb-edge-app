@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { RefreshCw, ChevronDown, ChevronUp, AlertCircle, Trophy, Info, Pencil, CheckCircle2, Flame, Search, Activity, ListChecks, LayoutGrid } from "lucide-react";
 
 // ---------------------------------------------------------------------------

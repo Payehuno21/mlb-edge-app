@@ -401,6 +401,76 @@ function getPropsForMatchup(matchup) {
 // ---------------------------------------------------------------------------
 const LOG_STORAGE_KEY = "mlbEdgeBetLog_v2";
 
+// ── GitHub sync ────────────────────────────────────────────────────────────
+// La bitácora se guarda en mlb-edge-data/bitacora.json via GitHub API.
+// El token se guarda en localStorage (nunca en el código fuente).
+// En producción, pide el token al usuario la primera vez y lo recuerda.
+const GITHUB_OWNER = "Payehuno21";
+const GITHUB_REPO  = "mlb-edge-data";
+const GITHUB_FILE  = "bitacora.json";
+const GITHUB_API   = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_FILE}`;
+const GITHUB_TOKEN_KEY = "mlbEdgeGithubToken";
+
+function getGithubToken() {
+  return localStorage.getItem(GITHUB_TOKEN_KEY) || "";
+}
+function setGithubToken(token) {
+  localStorage.setItem(GITHUB_TOKEN_KEY, token.trim());
+}
+
+async function fetchBitacoraFromGithub() {
+  const token = getGithubToken();
+  if (!token) return null;
+  try {
+    const res = await fetch(GITHUB_API, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" }
+    });
+    if (res.status === 404) return { entries: [], sha: null };
+    if (!res.ok) return null;
+    const data = await res.json();
+    const entries = JSON.parse(atob(data.content.replace(/\n/g, "")));
+    return { entries: Array.isArray(entries) ? entries : [], sha: data.sha };
+  } catch { return null; }
+}
+
+async function saveBitacoraToGithub(entries, sha) {
+  const token = getGithubToken();
+  if (!token) return null;
+  try {
+    const content = btoa(unescape(encodeURIComponent(JSON.stringify(entries, null, 2))));
+    const body = {
+      message: `Actualizar bitácora (${entries.length} apuestas)`,
+      content,
+      ...(sha ? { sha } : {})
+    };
+    const res = await fetch(GITHUB_API, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.content?.sha || null;
+  } catch { return null; }
+}
+
+// Fusiona dos listas de apuestas — si hay conflicto por id, gana la más
+// reciente según updatedAt (o createdAt como fallback).
+function mergeBetLogs(local, remote) {
+  const map = new Map();
+  const getTs = e => e.updatedAt || e.createdAt || e.id || 0;
+  for (const e of [...remote, ...local]) {
+    const existing = map.get(e.id);
+    if (!existing || getTs(e) >= getTs(existing)) map.set(e.id, e);
+  }
+  return Array.from(map.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+// ── fin GitHub sync ────────────────────────────────────────────────────────
+
 function loadBetLog() {
   try {
     const raw = localStorage.getItem(LOG_STORAGE_KEY);
@@ -1341,8 +1411,28 @@ function BetLogTab({ entries, setEntries }) {
   const [search, setSearch] = useState("");
   const [resultFilter, setResultFilter] = useState("all");
   const [marketFilter, setMarketFilter] = useState("all");
-  const [simFilter, setSimFilter] = useState("real"); // "real" | "sim" | "all" — default real para ver siempre tu dinero real primero
-  const [dateFilter, setDateFilter] = useState("today"); // "today" | "all" — default hoy para que la vista no se sienta infinita
+  const [simFilter, setSimFilter] = useState("real");
+  const [dateFilter, setDateFilter] = useState("today");
+  const [showTokenInput, setShowTokenInput] = useState(false);
+  const [tokenInput, setTokenInput] = useState("");
+  const [syncStatus, setSyncStatus] = useState(getGithubToken() ? "configured" : "not_configured");
+
+  const handleSaveToken = () => {
+    if (!tokenInput.trim()) return;
+    setGithubToken(tokenInput.trim());
+    setSyncStatus("configured");
+    setShowTokenInput(false);
+    setTokenInput("");
+    // Sincronizar inmediatamente con el nuevo token
+    fetchBitacoraFromGithub().then(result => {
+      if (!result || result.entries.length === 0) return;
+      setEntries(prev => {
+        const merged = mergeBetLogs(prev, result.entries);
+        saveBetLog(merged);
+        return merged;
+      });
+    });
+  };
 
   const todayISO = useMemo(() => new Date().toISOString().slice(0, 10), []);
 
@@ -1407,6 +1497,35 @@ function BetLogTab({ entries, setEntries }) {
 
   return (
     <div className="space-y-5">
+
+      {/* Banner de sincronización con GitHub */}
+      {syncStatus === "not_configured" ? (
+        <div className="rounded-xl bg-amber-400/10 ring-1 ring-amber-400/30 px-4 py-3">
+          <p className="fs-9 uppercase tracking-wider text-amber-300 font-semibold mb-1">Sincronización no configurada</p>
+          <p className="fs-10 text-white/60 mb-2">La bitácora solo vive en este dispositivo. Configura tu GitHub Token para sincronizar entre dispositivos sin perder datos.</p>
+          {!showTokenInput ? (
+            <button onClick={() => setShowTokenInput(true)} className="fs-9 font-bold text-amber-300 underline">Configurar ahora</button>
+          ) : (
+            <div className="flex gap-2 mt-1">
+              <input
+                type="password"
+                value={tokenInput}
+                onChange={e => setTokenInput(e.target.value)}
+                placeholder="Pega tu GitHub Token aquí"
+                className="flex-1 bg-white/5 ring-1 ring-white/10 rounded-lg px-3 py-1.5 text-xs text-brand placeholder:text-white/20 focus:outline-none"
+              />
+              <button onClick={handleSaveToken} className="px-3 py-1.5 rounded-lg bg-accent text-black fs-9 font-bold">Guardar</button>
+              <button onClick={() => setShowTokenInput(false)} className="px-3 py-1.5 rounded-lg bg-white/5 text-white/40 fs-9">Cancelar</button>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="rounded-xl bg-accent/5 ring-1 ring-accent/20 px-4 py-2 flex items-center justify-between">
+          <p className="fs-9 text-accent/70">✓ Sincronización con GitHub activa — la bitácora se guarda automáticamente</p>
+          <button onClick={() => { setShowTokenInput(false); setSyncStatus("not_configured"); setGithubToken(""); }} className="fs-9 text-white/30 underline ml-2">Cambiar</button>
+        </div>
+      )}
+
       <div className="flex gap-2">
         {[{ k: "today", l: "Hoy" }, { k: "all", l: "Todas las fechas" }].map(opt => (
           <button
@@ -1731,8 +1850,34 @@ export default function MLBEdge() {
   const [bankroll, setBankroll] = useState("1000");
   const [betLog, setBetLog] = useState(() => loadBetLog());
   const loggedKeys = useMemo(() => buildLoggedKeysSet(betLog), [betLog]);
+  const githubShaRef = useRef(null); // SHA del archivo en GitHub, necesario para actualizarlo
+  const syncTimeoutRef = useRef(null);
 
-  useEffect(() => { saveBetLog(betLog); }, [betLog]);
+  // Al montar: sincronizar con GitHub si hay token configurado
+  useEffect(() => {
+    fetchBitacoraFromGithub().then(result => {
+      if (!result) return; // sin token o error de red
+      githubShaRef.current = result.sha;
+      if (result.entries.length === 0) return; // archivo vacío o recién creado
+      setBetLog(prev => {
+        const merged = mergeBetLogs(prev, result.entries);
+        saveBetLog(merged);
+        return merged;
+      });
+    });
+  }, []);
+
+  // Al cambiar betLog: guardar en localStorage inmediatamente y en GitHub
+  // con debounce de 2 segundos para no hacer un commit por cada cambio menor.
+  useEffect(() => {
+    saveBetLog(betLog);
+    if (!getGithubToken()) return;
+    if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+    syncTimeoutRef.current = setTimeout(async () => {
+      const newSha = await saveBitacoraToGithub(betLog, githubShaRef.current);
+      if (newSha) githubShaRef.current = newSha;
+    }, 2000);
+  }, [betLog]);
 
   const [simulationMode, setSimulationMode] = useState(false);
 

@@ -213,15 +213,23 @@ function shrinkProb(p, factor = SHRINKAGE_FACTOR) {
 // Penalización para picks donde el modelo favorece a un desvalido
 // (prob > 50% pero mercado cotiza odds > 2.0). Los datos reales muestran
 // que en estos casos el win rate es solo 37.5%, muy por debajo del 50%+
-// que el modelo predice. Reduce el exceso de confianza contra el mercado
-// en un 90%. Debe coincidir con UNDERDOG_PENALTY en model.py (Python).
+// que el modelo predice. Reduce el exceso de confianza contra el mercado.
+// RL_EXTRA_DISCOUNT aplica un descuento adicional para Run Line porque el
+// mercado de RL es más eficiente — datos reales muestran 36% WR en RL
+// desvalido con odds 2.0-3.0. Debe coincidir con model.py (Python).
 const UNDERDOG_PENALTY = 0.9;
-function applyUnderdogPenalty(prob, decOdds) {
+const RL_EXTRA_DISCOUNT = 0.70;
+function applyUnderdogPenalty(prob, decOdds, isRL = false) {
   if (!prob || prob <= 0.5 || !decOdds || decOdds < 2.0) return prob;
   const probMercado = 1.0 / decOdds;
   const exceso = prob - probMercado;
   if (exceso <= 0) return prob;
-  return prob - exceso * UNDERDOG_PENALTY;
+  let probAdj = prob - exceso * UNDERDOG_PENALTY;
+  if (isRL) {
+    const excesoRestante = Math.max(probAdj - probMercado, 0);
+    probAdj = probAdj - excesoRestante * RL_EXTRA_DISCOUNT;
+  }
+  return probAdj;
 }
 
 // ---------------------------------------------------------------------------
@@ -1299,19 +1307,19 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
       const candidates = [
         { label: `ML ${m.home.abbr}`, prob: model.homeWinProb, odd: odds.mlHome, matchup: matchupLabel, otherOdd: odds.mlAway, gameKey: m.id },
         { label: `ML ${m.away.abbr}`, prob: model.awayWinProb, odd: odds.mlAway, matchup: matchupLabel, otherOdd: odds.mlHome, gameKey: m.id },
-        { label: `${favAbbr} -1.5`, prob: model.favMinus1_5, odd: odds.rlFav, matchup: matchupLabel, otherOdd: odds.rlDog, gameKey: m.id },
-        { label: `${dogAbbr} +1.5`, prob: model.dogPlus1_5, odd: odds.rlDog, matchup: matchupLabel, otherOdd: odds.rlFav, gameKey: m.id },
+        { label: `${favAbbr} -1.5`, prob: model.favMinus1_5, odd: odds.rlFav, matchup: matchupLabel, otherOdd: odds.rlDog, gameKey: m.id, isRL: true },
+        { label: `${dogAbbr} +1.5`, prob: model.dogPlus1_5, odd: odds.rlDog, matchup: matchupLabel, otherOdd: odds.rlFav, gameKey: m.id, isRL: true },
         { label: "Over " + (odds.totalLine || ""), prob: overProb, odd: odds.over, matchup: matchupLabel, otherOdd: odds.under, gameKey: m.id },
         { label: "Under " + (odds.totalLine || ""), prob: underProb, odd: odds.under, matchup: matchupLabel, otherOdd: odds.over, gameKey: m.id },
         { label: `ML F5 ${m.home.abbr}`, prob: model.f5.homeWinProb, odd: odds.f5MlHome, matchup: matchupLabel, otherOdd: odds.f5MlAway, gameKey: m.id },
         { label: `ML F5 ${m.away.abbr}`, prob: model.f5.awayWinProb, odd: odds.f5MlAway, matchup: matchupLabel, otherOdd: odds.f5MlHome, gameKey: m.id },
-        { label: `${f5FavAbbr} -0.5 F5`, prob: model.f5.favMinus0_5, odd: odds.f5RlFav, matchup: matchupLabel, otherOdd: odds.f5RlDog, gameKey: m.id },
-        { label: `${f5DogAbbr} +0.5 F5`, prob: model.f5.dogPlus0_5, odd: odds.f5RlDog, matchup: matchupLabel, otherOdd: odds.f5RlFav, gameKey: m.id },
+        { label: `${f5FavAbbr} -0.5 F5`, prob: model.f5.favMinus0_5, odd: odds.f5RlFav, matchup: matchupLabel, otherOdd: odds.f5RlDog, gameKey: m.id, isRL: true },
+        { label: `${f5DogAbbr} +0.5 F5`, prob: model.f5.dogPlus0_5, odd: odds.f5RlDog, matchup: matchupLabel, otherOdd: odds.f5RlFav, gameKey: m.id, isRL: true },
       ];
       for (const c of candidates) {
         if (!c.odd || !c.otherOdd || c.prob === null || c.prob === undefined) continue;
         if (!isSanePregameOdds(c.odd) || !isSanePregameOdds(c.otherOdd)) continue;
-        const probAdj = applyUnderdogPenalty(c.prob, c.odd);
+        const probAdj = applyUnderdogPenalty(c.prob, c.odd, c.isRL || false);
         const e = edgePct(probAdj, c.odd);
         if (e === null || Number.isNaN(e)) continue;
         allCandidates.push({ ...c, prob: probAdj, edge: e });

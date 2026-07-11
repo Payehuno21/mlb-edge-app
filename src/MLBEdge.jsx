@@ -171,7 +171,10 @@ function isSanePregameOdds(decOdds) {
 function edgePct(modelProb, decOdds) {
   const imp = impliedProbDecimal(decOdds);
   if (imp === null || modelProb === null || modelProb === undefined) return null;
-  return (modelProb - imp) * 100;
+  const raw = (modelProb - imp) * 100;
+  // Comprimir edges excesivamente altos — datos reales confirman que >20%
+  // de edge calculado corresponde a sobreconfianza del modelo, no a valor real.
+  return Math.min(raw, MAX_CREDIBLE_EDGE);
 }
 
 function edgeTier(edge) {
@@ -219,6 +222,12 @@ function shrinkProb(p, factor = SHRINKAGE_FACTOR) {
 // desvalido con odds 2.0-3.0. Debe coincidir con model.py (Python).
 const UNDERDOG_PENALTY = 0.9;
 const RL_EXTRA_DISCOUNT = 0.70;
+
+// Techo de edge creíble — datos reales (n=26) muestran que picks con edge
+// >20% tienen solo 34.6% de win rate, peor que un volado. Cualquier edge
+// calculado por encima de este techo se comprime a 20%. Debe coincidir
+// con MAX_CREDIBLE_EDGE en model.py (Python).
+const MAX_CREDIBLE_EDGE = 20.0;
 function applyUnderdogPenalty(prob, decOdds, isRL = false) {
   if (!prob || prob <= 0.5 || !decOdds || decOdds < 2.0) return prob;
   const probMercado = 1.0 / decOdds;

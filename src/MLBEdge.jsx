@@ -141,6 +141,7 @@ function normalizeGamesFromPipeline(payload, teamsById) {
       weather: g.weather ?? null,
       venue: g.venue ?? null,
       autoOdds: g.autoOdds ?? null,
+      consensus: g.autoOdds?.consensus ?? null,
       autoProps: g.autoProps ?? [],
       lineMovement: g.lineMovement ?? [],
       liveState: g.liveState ?? null,
@@ -1083,8 +1084,11 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
   const mlHomeEdge = edgePct(applyUnderdogPenalty(model.homeWinProb, odds.mlHome), odds.mlHome);
   const mlAwayEdge = edgePct(applyUnderdogPenalty(model.awayWinProb, odds.mlAway), odds.mlAway);
   const totalDiff = odds.totalLine !== "" && odds.totalLine !== undefined ? model.projectedTotal - Number(odds.totalLine) : null;
+  // Under usa factor más sensible (0.11 vs 0.09) y techo mayor (0.35 vs 0.30)
+  // porque los datos reales muestran que Under es más confiable que Over
+  // cuando el modelo proyecta un total menor a la línea del mercado.
   const overProb = totalDiff !== null ? 0.5 + Math.min(Math.max(totalDiff, 0) * 0.09, 0.30) : null;
-  const underProb = totalDiff !== null ? 0.5 + Math.min(Math.max(-totalDiff, 0) * 0.09, 0.30) : null;
+  const underProb = totalDiff !== null ? 0.5 + Math.min(Math.max(-totalDiff, 0) * 0.11, 0.35) : null;
   const overEdge = overProb !== null ? edgePct(overProb, odds.over) : null;
   const underEdge = underProb !== null ? edgePct(underProb, odds.under) : null;
 
@@ -1159,6 +1163,24 @@ function MatchupDetailPanel({ matchup, setMatchup, odds, setOdds, onClose, bankr
               )}
             </div>
           )}
+
+          {(() => {
+            // Sharp movement: spread >3pp entre casas en ML es señal de dinero
+            // moviéndose. Comparamos el consenso de múltiples bookmakers.
+            const consensus = matchup.consensus;
+            if (!consensus) return null;
+            const homeTeamConsensus = consensus[matchup.home?.name || matchup.home?.abbr];
+            const awayTeamConsensus = consensus[matchup.away?.name || matchup.away?.abbr];
+            const sharpMove = [homeTeamConsensus, awayTeamConsensus].find(c => c && c.spreadPp >= 3.0 && c.booksCount >= 3);
+            if (!sharpMove) return null;
+            const movingTeam = homeTeamConsensus === sharpMove ? matchup.home?.abbr : matchup.away?.abbr;
+            return (
+              <div className="rounded-xl bg-cyan-400/10 ring-1 ring-cyan-400/30 px-4 py-3">
+                <p className="fs-9 uppercase tracking-wider text-cyan-300 font-semibold mb-1">Movimiento de línea entre casas</p>
+                <p className="fs-10 text-white/60">{movingTeam}: spread de {sharpMove.spreadPp.toFixed(1)}pp entre {sharpMove.booksCount} casas (prob. consenso {(sharpMove.consensusProb * 100).toFixed(1)}%) — divergencia entre libros puede indicar dinero moviéndose.</p>
+              </div>
+            );
+          })()}
 
           {((matchup.home?.bullpenRecentIp ?? 0) > 9 || (matchup.away?.bullpenRecentIp ?? 0) > 9) && (
             <div className="rounded-xl bg-amber-400/10 ring-1 ring-amber-400/30 px-4 py-3">
@@ -1311,7 +1333,7 @@ function PickOfDay({ matchups, oddsMap, bankroll }) {
 
       const totalDiff = odds.totalLine !== "" && odds.totalLine !== undefined ? model.projectedTotal - Number(odds.totalLine) : null;
       const overProb = totalDiff !== null ? 0.5 + Math.min(Math.max(totalDiff, 0) * 0.09, 0.30) : null;
-      const underProb = totalDiff !== null ? 0.5 + Math.min(Math.max(-totalDiff, 0) * 0.09, 0.30) : null;
+      const underProb = totalDiff !== null ? 0.5 + Math.min(Math.max(-totalDiff, 0) * 0.11, 0.35) : null;
 
       const candidates = [
         { label: `ML ${m.home.abbr}`, prob: model.homeWinProb, odd: odds.mlHome, matchup: matchupLabel, otherOdd: odds.mlAway, gameKey: m.id },
@@ -1959,6 +1981,7 @@ export default function MLBEdge() {
         gamePk: g.gamePk,
         gameStartMs: g.gameStartMs,
         autoPropsFromOdds: g.autoProps ?? [],
+        consensus: g.consensus ?? null,
         lineMovement: g.lineMovement ?? [],
         liveState: g.liveState ?? null,
       };

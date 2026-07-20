@@ -209,7 +209,7 @@ function eloWinProb(diff) {
 // SHRINKAGE_FACTOR comprime la probabilidad hacia 50% proporcionalmente a su
 // distancia del centro. Debe coincidir con el mismo valor en model.py
 // (Python, usado por el correo) para que ambos den el mismo número.
-const SHRINKAGE_FACTOR = 0.65;
+const SHRINKAGE_FACTOR = 0.75;  // Calibrado 20 JUL: comprime más extremos (era 0.65)
 function shrinkProb(p, factor = SHRINKAGE_FACTOR) {
   return 0.5 + (p - 0.5) * factor;
 }
@@ -222,13 +222,13 @@ function shrinkProb(p, factor = SHRINKAGE_FACTOR) {
 // mercado de RL es más eficiente — datos reales muestran 36% WR en RL
 // desvalido con odds 2.0-3.0. Debe coincidir con model.py (Python).
 const UNDERDOG_PENALTY = 0.9;
-const RL_EXTRA_DISCOUNT = 0.70;
+const RL_EXTRA_DISCOUNT = 0.88;  // Calibrado 20 JUL: RL 37.7% WR → penaliza más (era 0.70)
 
 // Techo de edge creíble — datos reales (n=26) muestran que picks con edge
 // >20% tienen solo 34.6% de win rate, peor que un volado. Cualquier edge
 // calculado por encima de este techo se comprime a 20%. Debe coincidir
 // con MAX_CREDIBLE_EDGE en model.py (Python).
-const MAX_CREDIBLE_EDGE = 20.0;
+const MAX_CREDIBLE_EDGE = 18.0;  // Calibrado 20 JUL: techo más bajo (era 20.0, n=327)
 function applyUnderdogPenalty(prob, decOdds, isRL = false) {
   if (!prob || prob <= 0.5 || !decOdds || decOdds < 2.0) return prob;
   const probMercado = 1.0 / decOdds;
